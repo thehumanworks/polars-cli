@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Meet the Assistant</title>
+    <style>
+      :root {
+        --bg: linear-gradient(140deg, #0f1023, #1a1e47 40%, #243f72);
+        --panel: rgba(17, 22, 48, 0.78);
+        --text: #ecf0ff;
+        --muted: #d2dcff;
+        --accent: #7ce7ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+        color: var(--text);
+        min-height: 100vh;
+        background: var(--bg);
+      }
+
+      .grid {
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 2rem;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .grid::before,
+      .grid::after {
+        content: "";
+        position: absolute;
+        width: 24rem;
+        height: 24rem;
+        border-radius: 50%;
+        filter: blur(50px);
+        opacity: 0.22;
+        animation: drift 16s ease-in-out infinite alternate;
+      }
+
+      .grid::before {
+        background: #7ce7ff;
+        top: -4rem;
+        right: 8rem;
+      }
+
+      .grid::after {
+        background: #ff7cd1;
+        bottom: -6rem;
+        left: -3rem;
+      }
+
+      .card {
+        position: relative;
+        z-index: 1;
+        width: min(860px, 100%);
+        background: var(--panel);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+        border-radius: 1.2rem;
+        padding: 2.2rem;
+        backdrop-filter: blur(8px);
+        box-shadow: 0 18px 60px rgba(0, 0, 0, 0.35);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: clamp(2rem, 4vw, 3rem);
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      .tagline {
+        margin-top: 0.6rem;
+        color: var(--muted);
+        font-style: italic;
+      }
+
+      .about {
+        margin-top: 1.3rem;
+        display: grid;
+        gap: 1rem;
+      }
+
+      .statline {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 1rem;
+      }
+
+      .stat {
+        background: rgba(255, 255, 255, 0.08);
+        border-radius: 0.8rem;
+        padding: 1rem;
+      }
+
+      .stat strong {
+        display: block;
+        color: var(--accent);
+        font-size: 1.1rem;
+        margin-bottom: 0.3rem;
+      }
+
+      ul {
+        margin: 0;
+        padding-left: 1.1rem;
+      }
+
+      li::marker {
+        color: var(--accent);
+      }
+
+      @media (max-width: 650px) {
+        .statline {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      @keyframes drift {
+        from { transform: translateY(-10px) scale(1); }
+        to { transform: translateY(14px) scale(1.05); }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="grid">
+      <section class="card">
+        <h1>Meet the Assistant</h1>
+        <p class="tagline">I am ChatGPT, a large language model trained by OpenAI.</p>
+
+        <div class="about">
+          <p>
+            I help people turn ideas into code, explain complex systems simply, and
+            prototype fast with practical, iterative steps. I am text-based, but I
+            can also reason through problems, build web pages, patch scripts,
+            and propose debugging strategies.
+          </p>
+          <p>
+            I am designed to be precise, concise, and collaborative. I do not
+            remember private data between chats unless explicitly connected, and I
+            prefer clear assumptions and explicit constraints before I start work.
+          </p>
+
+          <div class="statline">
+            <article class="stat">
+              <strong>Core role</strong>
+              <p>AI coding and reasoning partner focused on useful, actionable output.</p>
+            </article>
+            <article class="stat">
+              <strong>Strength</strong>
+              <p>Turning ambiguous goals into concrete steps and concrete files, fast.</p>
+            </article>
+          </div>
+
+          <p><strong>What I can help with:</strong></p>
+          <ul>
+            <li>Writing or editing HTML, CSS, JS, Python, shell scripts.</li>
+            <li>Debugging and suggesting minimal, safe code changes.</li>
+            <li>Designing clean user interfaces with purpose and consistent behavior.</li>
+          </ul>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

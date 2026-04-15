@@ -3,11 +3,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use polars::df;
 use polars_cli::read::{
-    InputFormat, detect_input_format, read_html_file, read_markdown_file, read_text_file,
+    InputFormat, detect_input_format, read_markdown_file, read_table_file, read_text_file,
     read_toml_file, read_xml_file,
 };
+use polars_cli::sql::SqlEngine;
 use polars_cli::transformer::{
-    JsonFormat, to_csv, to_html, to_json, to_markdown, to_text_lines, to_xml,
+    JsonFormat, html_document_to_markdown, to_csv, to_html, to_json, to_markdown, to_text_lines,
+    to_xml,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -46,7 +48,7 @@ fn detects_input_format_from_file_extension() -> Result<()> {
         InputFormat::Markdown
     );
     assert_eq!(
-        detect_input_format(Path::new("table.html"))?,
+        detect_input_format(Path::new("page.html"))?,
         InputFormat::Html
     );
     assert_eq!(
@@ -98,7 +100,7 @@ fn read_markdown_file_parses_the_first_table() -> Result<()> {
 }
 
 #[test]
-fn read_html_file_parses_the_first_table() -> Result<()> {
+fn read_table_file_parses_the_first_html_table() -> Result<()> {
     let dir = TempDir::new()?;
     let path = write_fixture(
         &dir,
@@ -106,7 +108,7 @@ fn read_html_file_parses_the_first_table() -> Result<()> {
         "<html><body><table><thead><tr><th>name</th><th>count</th></tr></thead><tbody><tr><td>alpha</td><td>1</td></tr><tr><td>beta</td><td>2</td></tr></tbody></table></body></html>",
     )?;
 
-    let mut df = read_html_file(&path)?;
+    let mut df = read_table_file(&path)?;
 
     assert_eq!(
         as_json(&mut df)?,
@@ -171,6 +173,38 @@ fn markdown_output_renders_a_pipe_table() -> Result<()> {
         rendered,
         "| id | name |\n| --- | --- |\n| 1 | alpha |\n| 2 | beta |"
     );
+
+    Ok(())
+}
+
+#[test]
+fn html_document_to_markdown_skips_style_tag_content() -> Result<()> {
+    let rendered =
+        html_document_to_markdown("<style>body { color: red; }</style><h1>Hello</h1><p>World</p>")?;
+
+    assert_eq!(rendered, "# Hello\n\nWorld");
+
+    Ok(())
+}
+
+#[test]
+fn html_document_to_markdown_skips_title_tag_content() -> Result<()> {
+    let rendered = html_document_to_markdown(
+        "<html><head><title>Demo Title</title></head><body><h1>Hello</h1><p>World</p></body></html>",
+    )?;
+
+    assert_eq!(rendered, "# Hello\n\nWorld");
+
+    Ok(())
+}
+
+#[test]
+fn html_document_to_markdown_skips_common_non_content_tags() -> Result<()> {
+    let rendered = html_document_to_markdown(
+        "<html><head><title>Demo Title</title><meta name=\"description\" content=\"ignored\"><link rel=\"stylesheet\" href=\"app.css\"></head><body><script>console.log('ignored')</script><template><p>Hidden</p></template><h1>Hello</h1><p>World</p></body></html>",
+    )?;
+
+    assert_eq!(rendered, "# Hello\n\nWorld");
 
     Ok(())
 }
@@ -298,6 +332,133 @@ fn read_toml_file_supports_a_single_array_of_tables() -> Result<()> {
         ])
     );
 
+    Ok(())
+}
+
+#[test]
+fn sql_engine_runs_select_over_a_registered_csv_file() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(&dir, "people.csv", "name,age\nalice,30\nbob,25\n")?;
+
+    let mut engine = SqlEngine::new();
+    engine.register_path(&path, None)?;
+
+    let mut df = engine.execute_collect("SELECT name FROM people WHERE age >= 30 ORDER BY name")?;
+
+    assert_eq!(as_json(&mut df)?, json!([{"name": "alice"}]));
+    Ok(())
+}
+
+#[test]
+fn sql_engine_uses_explicit_alias_over_file_stem() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(&dir, "raw.csv", "city,pop\namsterdam,900\nutrecht,360\n")?;
+
+    let mut engine = SqlEngine::new();
+    engine.register_path(&path, Some("cities"))?;
+
+    let mut df = engine.execute_collect("SELECT city FROM cities WHERE pop > 500 ORDER BY city")?;
+
+    assert_eq!(as_json(&mut df)?, json!([{"city": "amsterdam"}]));
+    Ok(())
+}
+
+#[test]
+fn sql_engine_joins_csv_and_json_tables() -> Result<()> {
+    let dir = TempDir::new()?;
+    let people = write_fixture(&dir, "people.csv", "id,name\n1,alice\n2,bob\n")?;
+    let scores = write_fixture(
+        &dir,
+        "scores.json",
+        "[{\"id\": 1, \"score\": 90}, {\"id\": 2, \"score\": 70}]",
+    )?;
+
+    let mut engine = SqlEngine::new();
+    engine.register_path(&people, None)?;
+    engine.register_path(&scores, None)?;
+
+    let mut df = engine.execute_collect(
+        "SELECT people.name, scores.score FROM people \
+         JOIN scores ON people.id = scores.id ORDER BY people.name",
+    )?;
+
+    assert_eq!(
+        as_json(&mut df)?,
+        json!([
+            {"name": "alice", "score": 90},
+            {"name": "bob", "score": 70}
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn sql_engine_registers_every_supported_file_in_a_directory() -> Result<()> {
+    let dir = TempDir::new()?;
+    write_fixture(&dir, "left.csv", "id,name\n1,alice\n2,bob\n")?;
+    write_fixture(
+        &dir,
+        "right.json",
+        "[{\"id\": 1, \"score\": 90}, {\"id\": 2, \"score\": 70}]",
+    )?;
+
+    let mut engine = SqlEngine::new();
+    engine.register_directory(dir.path())?;
+
+    let mut df = engine.execute_collect(
+        "SELECT left.name, right.score FROM left \
+         JOIN right ON left.id = right.id ORDER BY left.name",
+    )?;
+
+    assert_eq!(
+        as_json(&mut df)?,
+        json!([
+            {"name": "alice", "score": 90},
+            {"name": "bob", "score": 70}
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn sql_engine_supports_polars_read_csv_table_function() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(&dir, "records.csv", "id,name\n1,alice\n2,bob\n")?;
+
+    let mut engine = SqlEngine::new();
+    let query = format!(
+        "SELECT name FROM read_csv('{}') WHERE id = 2",
+        path.display()
+    );
+    let mut df = engine.execute_collect(&query)?;
+
+    assert_eq!(as_json(&mut df)?, json!([{"name": "bob"}]));
+    Ok(())
+}
+
+#[test]
+fn sql_engine_supports_group_by_aggregates() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(
+        &dir,
+        "orders.csv",
+        "product,amount\napple,5\napple,3\npear,2\n",
+    )?;
+
+    let mut engine = SqlEngine::new();
+    engine.register_path(&path, None)?;
+
+    let mut df = engine.execute_collect(
+        "SELECT product, SUM(amount) AS total FROM orders GROUP BY product ORDER BY product",
+    )?;
+
+    assert_eq!(
+        as_json(&mut df)?,
+        json!([
+            {"product": "apple", "total": 8},
+            {"product": "pear", "total": 2}
+        ])
+    );
     Ok(())
 }
 

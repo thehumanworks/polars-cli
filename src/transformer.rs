@@ -1,11 +1,16 @@
 use std::{borrow::Cow, fmt::Display};
 
 use anyhow::{Context, bail};
+use htmd::HtmlToMarkdown;
 use polars::prelude::{AnyValue, SerWriter};
 use polars::{
     frame::DataFrame,
     prelude::{CsvWriter, JsonFormat as PlJsonFormat, JsonWriter, QuoteStyle},
 };
+
+const HTML_MARKDOWN_SKIP_TAGS: &[&str] = &[
+    "head", "title", "script", "style", "meta", "link", "template",
+];
 
 #[derive(Debug, Clone, Copy, Default)]
 pub enum JsonFormat {
@@ -136,6 +141,14 @@ pub fn to_xml(df: &mut DataFrame) -> anyhow::Result<String> {
         .collect::<String>();
 
     Ok(format!("<rows>{body}</rows>"))
+}
+
+pub fn html_document_to_markdown(input: &str) -> anyhow::Result<String> {
+    HtmlToMarkdown::builder()
+        .skip_tags(HTML_MARKDOWN_SKIP_TAGS.to_vec())
+        .build()
+        .convert(input)
+        .map_err(Into::into)
 }
 
 fn dataframe_to_string_rows(df: &DataFrame) -> anyhow::Result<(Vec<String>, Vec<Vec<String>>)> {

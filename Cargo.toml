@@ -2,11 +2,13 @@
 name = "polars-cli"
 version = "0.1.0"
 edition = "2024"
+default-run = "pl"
 
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5.41", features = ["derive"] }
-polars = { version = "0.53.0", features = ["csv", "json"] }
+htmd = "0.5.4"
+polars = { version = "0.53.0", features = ["csv", "json", "lazy", "sql"] }
 pulldown-cmark = "0.13.3"
 roxmltree = "0.21.1"
 scraper = "0.26.0"
@@ -16,6 +18,14 @@ toml = "0.9.8"
 [lib]
 name = "polars_cli"
 path = "src/lib.rs"
+
+[[bin]]
+name = "pl"
+path = "src/bin/pl.rs"
+
+[[bin]]
+name = "polars"
+path = "src/bin/polars.rs"
 
 [dev-dependencies]
 assert_cmd = "2.1.1"

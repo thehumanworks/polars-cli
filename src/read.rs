@@ -19,8 +19,10 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InputFormat {
     Csv,
+    Json,
     Text,
     Toml,
+    Table,
     Markdown,
     Html,
     Xml,
@@ -35,10 +37,14 @@ pub fn read_file(path: impl AsRef<Path>, format: Option<InputFormat>) -> anyhow:
 
     match format {
         InputFormat::Csv => read_csv_file(path),
+        InputFormat::Json => read_json_file(path),
         InputFormat::Text => read_text_file(path),
         InputFormat::Toml => read_toml_file(path),
+        InputFormat::Table => read_table_file(path),
         InputFormat::Markdown => read_markdown_file(path),
-        InputFormat::Html => read_html_file(path),
+        InputFormat::Html => bail!(
+            "HTML document input does not map directly to tabular data. Use --to markdown for document conversion, or use --from table to parse the first HTML <table>"
+        ),
         InputFormat::Xml => read_xml_file(path),
     }
 }
@@ -59,13 +65,14 @@ pub fn detect_input_format(path: &Path) -> anyhow::Result<InputFormat> {
         .as_deref()
     {
         Some("csv") => Ok(InputFormat::Csv),
+        Some("json" | "jsonl" | "ndjson") => Ok(InputFormat::Json),
         Some("txt" | "text") => Ok(InputFormat::Text),
         Some("toml") => Ok(InputFormat::Toml),
         Some("md" | "markdown") => Ok(InputFormat::Markdown),
         Some("html" | "htm") => Ok(InputFormat::Html),
         Some("xml") => Ok(InputFormat::Xml),
         _ => bail!(
-            "unsupported input format for {}. Use --from to specify csv, text, toml, markdown, html, or xml",
+            "unsupported input format for {}. Use --from to specify csv, json, text, toml, table, markdown, html, or xml",
             path.display()
         ),
     }
@@ -76,6 +83,13 @@ pub fn read_csv_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
     let input = std::fs::read(path)
         .with_context(|| format!("failed to read CSV input {}", path.display()))?;
     read_csv_bytes(&input)
+}
+
+pub fn read_json_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
+    let path = path.as_ref();
+    let input = std::fs::read(path)
+        .with_context(|| format!("failed to read JSON input {}", path.display()))?;
+    read_json_bytes(&input)
 }
 
 pub fn read_text_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
@@ -99,11 +113,11 @@ pub fn read_markdown_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
     read_markdown_bytes(&input, &path.display().to_string())
 }
 
-pub fn read_html_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
+pub fn read_table_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
     let path = path.as_ref();
     let input = std::fs::read(path)
-        .with_context(|| format!("failed to read HTML input {}", path.display()))?;
-    read_html_bytes(&input, &path.display().to_string())
+        .with_context(|| format!("failed to read table input {}", path.display()))?;
+    read_table_bytes(&input, &path.display().to_string())
 }
 
 pub fn read_xml_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
@@ -134,10 +148,14 @@ fn toml_value_to_json_rows(value: toml::Value) -> anyhow::Result<Vec<JsonValue>>
 fn read_bytes(input: &[u8], format: InputFormat, label: &str) -> anyhow::Result<DataFrame> {
     match format {
         InputFormat::Csv => read_csv_bytes(input),
+        InputFormat::Json => read_json_bytes(input),
         InputFormat::Text => read_text_bytes(input, label),
         InputFormat::Toml => read_toml_bytes(input, label),
+        InputFormat::Table => read_table_bytes(input, label),
         InputFormat::Markdown => read_markdown_bytes(input, label),
-        InputFormat::Html => read_html_bytes(input, label),
+        InputFormat::Html => bail!(
+            "HTML document input does not map directly to tabular data. Use --to markdown for document conversion, or use --from table to parse the first HTML <table>"
+        ),
         InputFormat::Xml => read_xml_bytes(input, label),
     }
 }
@@ -147,6 +165,11 @@ fn read_csv_bytes(input: &[u8]) -> anyhow::Result<DataFrame> {
         .with_options(CsvReadOptions::default().with_has_header(true))
         .finish()
         .map_err(Into::into)
+}
+
+fn read_json_bytes(input: &[u8]) -> anyhow::Result<DataFrame> {
+    let mut cursor = Cursor::new(input);
+    JsonReader::new(&mut cursor).finish().map_err(Into::into)
 }
 
 fn read_text_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
@@ -172,16 +195,16 @@ fn read_markdown_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
     let parser = MarkdownParser::new_ext(markdown, options);
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
-    let rows = html_table_to_json_rows(&html_output)?;
+    let (columns, rows) = html_table_to_json_rows(&html_output)?;
 
-    json_rows_to_dataframe(rows)
+    json_rows_to_dataframe_with_order(rows, &columns)
 }
 
-fn read_html_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
+fn read_table_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
     let html = input_as_utf8(input, label)?;
-    let rows = html_table_to_json_rows(html)?;
+    let (columns, rows) = html_table_to_json_rows(html)?;
 
-    json_rows_to_dataframe(rows)
+    json_rows_to_dataframe_with_order(rows, &columns)
 }
 
 fn read_xml_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
@@ -202,11 +225,24 @@ fn json_rows_to_dataframe(rows: Vec<JsonValue>) -> anyhow::Result<DataFrame> {
     JsonReader::new(&mut cursor).finish().map_err(Into::into)
 }
 
+fn json_rows_to_dataframe_with_order(
+    rows: Vec<JsonValue>,
+    column_order: &[String],
+) -> anyhow::Result<DataFrame> {
+    let df = json_rows_to_dataframe(rows)?;
+    if column_order.is_empty() {
+        return Ok(df);
+    }
+
+    df.select(column_order.iter().map(String::as_str))
+        .map_err(Into::into)
+}
+
 fn input_as_utf8<'a>(input: &'a [u8], label: &str) -> anyhow::Result<&'a str> {
     std::str::from_utf8(input).with_context(|| format!("input {label} is not valid UTF-8"))
 }
 
-fn html_table_to_json_rows(input: &str) -> anyhow::Result<Vec<JsonValue>> {
+fn html_table_to_json_rows(input: &str) -> anyhow::Result<(Vec<String>, Vec<JsonValue>)> {
     let document = Html::parse_document(input);
     let table_selector = parse_selector("table")?;
     let row_selector = parse_selector("tr")?;
@@ -270,7 +306,7 @@ fn xml_to_json_rows(input: &str) -> anyhow::Result<Vec<JsonValue>> {
 fn table_rows_to_json_rows(
     header: Option<Vec<String>>,
     rows: Vec<Vec<String>>,
-) -> anyhow::Result<Vec<JsonValue>> {
+) -> anyhow::Result<(Vec<String>, Vec<JsonValue>)> {
     if rows.is_empty() {
         bail!("table input must contain at least one data row");
     }
@@ -281,7 +317,7 @@ fn table_rows_to_json_rows(
         columns.extend((columns.len()..width).map(|idx| format!("column_{}", idx + 1)));
     }
 
-    Ok(rows
+    let json_rows = rows
         .into_iter()
         .map(|row| {
             let mut object = JsonMap::new();
@@ -294,7 +330,9 @@ fn table_rows_to_json_rows(
             }
             JsonValue::Object(object)
         })
-        .collect())
+        .collect();
+
+    Ok((columns, json_rows))
 }
 
 fn xml_row_to_json_object(node: Node<'_, '_>) -> anyhow::Result<JsonMap<String, JsonValue>> {
