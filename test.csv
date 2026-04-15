@@ -1,0 +1,11 @@
+id,name,department,city,age,salary,is_active,signup_date
+1,Alice Chen,Engineering,New York,29,85000,true,2024-01-15
+2,Ben Carter,Marketing,San Francisco,34,72000,false,2023-11-08
+3,Chloe Patel,Sales,Chicago,41,65000,true,2022-07-22
+4,David Kim,Engineering,Austin,27,90000,true,2023-03-03
+5,Elena Ruiz,Support,Miami,31,58000,false,2023-09-17
+6,Farah Ahmed,HR,Seattle,38,61000,true,2021-12-04
+7,George Smith,Finance,Denver,45,76000,true,2020-05-29
+8,Hannah Lee,Marketing,Portland,26,54000,false,2024-02-11
+9,Ian Thompson,Engineering,Boston,33,92000,true,2023-06-14
+10,Julia Gomez,Operations,Atlanta,39,67000,true,2022-10-30

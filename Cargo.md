@@ -1,0 +1,3 @@
+| dependencies.anyhow | dependencies.clap.features | dependencies.clap.version | dependencies.polars.features | dependencies.polars.version | dependencies.pulldown-cmark | dependencies.roxmltree | dependencies.scraper | dependencies.serde_json | dependencies.toml | dev-dependencies.assert_cmd | dev-dependencies.predicates | dev-dependencies.serde_json | dev-dependencies.tempfile | lib.name | lib.path | package.edition | package.name | package.version |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1.0.102 | ["derive"] | 4.5.41 | ["csv", "json"] | 0.53.0 | 0.13.3 | 0.21.1 | 0.26.0 | 1.0.149 | 0.9.8 | 2.1.1 | 3.1.3 | 1.0.149 | 3.23.0 | polars_cli | src/lib.rs | 2024 | polars-cli | 0.1.0 |
