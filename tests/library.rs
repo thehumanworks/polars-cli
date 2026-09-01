@@ -3,13 +3,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use polars::df;
 use polars_cli::read::{
-    InputFormat, detect_input_format, read_markdown_file, read_table_file, read_text_file,
-    read_toml_file, read_xml_file,
+    InputFormat, detect_input_format, detect_input_format_from_bytes, read_bytes,
+    read_markdown_file, read_table_file, read_text_file, read_toml_file, read_xml_file,
 };
 use polars_cli::sql::SqlEngine;
 use polars_cli::transformer::{
-    JsonFormat, html_document_to_markdown, to_csv, to_html, to_json, to_markdown, to_text_lines,
-    to_xml,
+    JsonFormat, html_document_to_markdown, to_csv, to_html, to_json, to_markdown, to_table,
+    to_text_lines, to_toml, to_tsv, to_xml, to_yaml,
 };
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -215,7 +215,7 @@ fn text_output_renders_single_column_rows_as_lines() -> Result<()> {
 
     let rendered = to_text_lines(&mut df)?;
 
-    assert_eq!(rendered, "alpha\nbeta");
+    assert_eq!(rendered, "alpha\nbeta\n");
 
     Ok(())
 }
@@ -488,5 +488,108 @@ fn read_toml_file_flattens_nested_tables_into_a_single_row() -> Result<()> {
         ])
     );
 
+    Ok(())
+}
+
+#[test]
+fn detects_new_input_formats_from_extensions() -> Result<()> {
+    assert_eq!(
+        detect_input_format(Path::new("data.tsv"))?,
+        InputFormat::Tsv
+    );
+    assert_eq!(
+        detect_input_format(Path::new("events.ndjson"))?,
+        InputFormat::Jsonl
+    );
+    assert_eq!(
+        detect_input_format(Path::new("config.yml"))?,
+        InputFormat::Yaml
+    );
+    Ok(())
+}
+
+#[test]
+fn sniffs_pipeline_formats_from_content() -> Result<()> {
+    assert_eq!(
+        detect_input_format_from_bytes(b"name,age\nAda,36\n")?,
+        InputFormat::Csv
+    );
+    assert_eq!(
+        detect_input_format_from_bytes(b"name\tage\nAda\t36\n")?,
+        InputFormat::Tsv
+    );
+    assert_eq!(
+        detect_input_format_from_bytes(b"{\"id\":1}\n{\"id\":2}\n")?,
+        InputFormat::Jsonl
+    );
+    assert_eq!(
+        detect_input_format_from_bytes(b"- name: Ada\n  age: 36\n")?,
+        InputFormat::Yaml
+    );
+    Ok(())
+}
+
+#[test]
+fn reads_json_objects_scalars_json_lines_yaml_and_tsv() -> Result<()> {
+    let mut object = read_bytes(b"{\"name\":\"Ada\",\"age\":36}", InputFormat::Json, "test")?;
+    assert_eq!(as_json(&mut object)?, json!([{"name": "Ada", "age": 36}]));
+
+    let mut scalar = read_bytes(b"42", InputFormat::Json, "test")?;
+    assert_eq!(as_json(&mut scalar)?, json!([{"value": 42}]));
+
+    let mut jsonl = read_bytes(b"{\"id\":1}\n{\"id\":2}\n", InputFormat::Jsonl, "test")?;
+    assert_eq!(as_json(&mut jsonl)?, json!([{"id": 1}, {"id": 2}]));
+
+    let mut yaml = read_bytes(
+        b"- name: Ada\n  age: 36\n- name: Lin\n  age: 28\n",
+        InputFormat::Yaml,
+        "test",
+    )?;
+    assert_eq!(
+        as_json(&mut yaml)?,
+        json!([
+            {"name": "Ada", "age": 36},
+            {"name": "Lin", "age": 28}
+        ])
+    );
+
+    let mut tsv = read_bytes(b"name\tage\nAda\t36\n", InputFormat::Tsv, "test")?;
+    assert_eq!(as_json(&mut tsv)?, json!([{"name": "Ada", "age": 36}]));
+    Ok(())
+}
+
+#[test]
+fn renders_tsv_yaml_toml_and_plain_tables() -> Result<()> {
+    let mut frame = df!(
+        "name" => &["Ada", "Lin"],
+        "age" => &[36, 28],
+    )?;
+
+    assert_eq!(
+        to_tsv(&mut frame, Some(true))?,
+        "name\tage\nAda\t36\nLin\t28\n"
+    );
+    assert_eq!(
+        to_yaml(&mut frame)?,
+        "- name: Ada\n  age: 36\n- name: Lin\n  age: 28\n"
+    );
+    assert_eq!(
+        to_toml(&mut frame)?,
+        "[[rows]]\nname = \"Ada\"\nage = 36\n\n[[rows]]\nname = \"Lin\"\nage = 28\n"
+    );
+    assert_eq!(
+        to_table(&mut frame)?,
+        "name  age\n----  ---\nAda   36\nLin   28"
+    );
+    Ok(())
+}
+
+#[test]
+fn sniffs_quoted_and_multiline_csv_content() -> Result<()> {
+    let quoted = b"name,note\nAda,\"hello, world\"\n";
+    assert_eq!(detect_input_format_from_bytes(quoted)?, InputFormat::Csv);
+
+    let multiline = b"name,note\nAda,\"hello\nworld\"\n";
+    assert_eq!(detect_input_format_from_bytes(multiline)?, InputFormat::Csv);
     Ok(())
 }

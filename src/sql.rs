@@ -41,13 +41,8 @@ impl SqlEngine {
             );
         }
 
-        let format = detect_input_format(path).with_context(|| {
-            format!(
-                "failed to detect a supported input format for {}",
-                path.display()
-            )
-        })?;
-        let df = read_file(path, Some(format))?;
+        let df = read_file(path, None)
+            .with_context(|| format!("failed to read table input {}", path.display()))?;
 
         let name = match alias {
             Some(alias) => alias.to_owned(),
@@ -69,7 +64,10 @@ impl SqlEngine {
             .filter_map(|entry| entry.ok().map(|entry| entry.path()))
             .filter(|entry| entry.is_file())
             .filter(|entry| !is_hidden(entry))
-            .filter(|entry| detect_input_format(entry).is_ok())
+            .filter(|entry| {
+                detect_input_format(entry)
+                    .is_ok_and(|format| format != crate::read::InputFormat::Html)
+            })
             .collect();
         entries.sort();
 

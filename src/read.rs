@@ -19,7 +19,12 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InputFormat {
     Csv,
+    Tsv,
     Json,
+    #[value(alias = "ndjson")]
+    Jsonl,
+    #[value(alias = "yml")]
+    Yaml,
     Text,
     Toml,
     Table,
@@ -30,23 +35,13 @@ pub enum InputFormat {
 
 pub fn read_file(path: impl AsRef<Path>, format: Option<InputFormat>) -> anyhow::Result<DataFrame> {
     let path = path.as_ref();
+    let input =
+        std::fs::read(path).with_context(|| format!("failed to read input {}", path.display()))?;
     let format = match format {
         Some(format) => format,
-        None => detect_input_format(path)?,
+        None => detect_input_format(path).or_else(|_| detect_input_format_from_bytes(&input))?,
     };
-
-    match format {
-        InputFormat::Csv => read_csv_file(path),
-        InputFormat::Json => read_json_file(path),
-        InputFormat::Text => read_text_file(path),
-        InputFormat::Toml => read_toml_file(path),
-        InputFormat::Table => read_table_file(path),
-        InputFormat::Markdown => read_markdown_file(path),
-        InputFormat::Html => bail!(
-            "HTML document input does not map directly to tabular data. Use --to markdown for document conversion, or use --from table to parse the first HTML <table>"
-        ),
-        InputFormat::Xml => read_xml_file(path),
-    }
+    read_bytes(&input, format, &path.display().to_string())
 }
 
 pub fn read_stdin(format: InputFormat) -> anyhow::Result<DataFrame> {
@@ -65,66 +60,110 @@ pub fn detect_input_format(path: &Path) -> anyhow::Result<InputFormat> {
         .as_deref()
     {
         Some("csv") => Ok(InputFormat::Csv),
-        Some("json" | "jsonl" | "ndjson") => Ok(InputFormat::Json),
+        Some("tsv" | "tab") => Ok(InputFormat::Tsv),
+        Some("json") => Ok(InputFormat::Json),
+        Some("jsonl" | "ndjson") => Ok(InputFormat::Jsonl),
+        Some("yaml" | "yml") => Ok(InputFormat::Yaml),
         Some("txt" | "text") => Ok(InputFormat::Text),
         Some("toml") => Ok(InputFormat::Toml),
         Some("md" | "markdown") => Ok(InputFormat::Markdown),
         Some("html" | "htm") => Ok(InputFormat::Html),
         Some("xml") => Ok(InputFormat::Xml),
         _ => bail!(
-            "unsupported input format for {}. Use --from to specify csv, json, text, toml, table, markdown, html, or xml",
+            "unsupported input format for {}. Use --from or provide recognizable structured content",
             path.display()
         ),
     }
 }
 
+pub fn detect_input_format_from_bytes(input: &[u8]) -> anyhow::Result<InputFormat> {
+    let text = input_as_utf8(input, "input")?;
+    let text = text.trim_start_matches('\u{feff}').trim();
+    if text.is_empty() {
+        bail!("input is empty");
+    }
+
+    if serde_json::from_str::<JsonValue>(text).is_ok() {
+        return Ok(InputFormat::Json);
+    }
+    if looks_like_json_lines(text) {
+        return Ok(InputFormat::Jsonl);
+    }
+    if looks_like_markdown_table(text) {
+        return Ok(InputFormat::Markdown);
+    }
+    if text.starts_with('<') {
+        let lowercase = text.to_ascii_lowercase();
+        if lowercase.starts_with("<!doctype html")
+            || lowercase.contains("<html")
+            || lowercase.contains("<body")
+            || lowercase.starts_with("<h1")
+            || lowercase.starts_with("<p")
+        {
+            return Ok(InputFormat::Html);
+        }
+        if lowercase.contains("<table") {
+            return Ok(InputFormat::Table);
+        }
+        if Document::parse(text).is_ok() {
+            return Ok(InputFormat::Xml);
+        }
+        return Ok(InputFormat::Html);
+    }
+    if looks_like_delimited(text, '\t') {
+        return Ok(InputFormat::Tsv);
+    }
+    if looks_like_delimited(text, ',') {
+        return Ok(InputFormat::Csv);
+    }
+    if looks_like_toml(text) && toml::from_str::<toml::Value>(text).is_ok() {
+        return Ok(InputFormat::Toml);
+    }
+    if looks_like_yaml(text) && yaml_serde::from_str::<JsonValue>(text).is_ok() {
+        return Ok(InputFormat::Yaml);
+    }
+
+    Ok(InputFormat::Text)
+}
+
 pub fn read_csv_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read CSV input {}", path.display()))?;
-    read_csv_bytes(&input)
+    read_file(path, Some(InputFormat::Csv))
+}
+
+pub fn read_tsv_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
+    read_file(path, Some(InputFormat::Tsv))
 }
 
 pub fn read_json_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read JSON input {}", path.display()))?;
-    read_json_bytes(&input)
+    read_file(path, Some(InputFormat::Json))
+}
+
+pub fn read_jsonl_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
+    read_file(path, Some(InputFormat::Jsonl))
+}
+
+pub fn read_yaml_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
+    read_file(path, Some(InputFormat::Yaml))
 }
 
 pub fn read_text_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read text input {}", path.display()))?;
-    read_text_bytes(&input, &path.display().to_string())
+    read_file(path, Some(InputFormat::Text))
 }
 
 pub fn read_toml_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read TOML input {}", path.display()))?;
-    read_toml_bytes(&input, &path.display().to_string())
+    read_file(path, Some(InputFormat::Toml))
 }
 
 pub fn read_markdown_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read Markdown input {}", path.display()))?;
-    read_markdown_bytes(&input, &path.display().to_string())
+    read_file(path, Some(InputFormat::Markdown))
 }
 
 pub fn read_table_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read table input {}", path.display()))?;
-    read_table_bytes(&input, &path.display().to_string())
+    read_file(path, Some(InputFormat::Table))
 }
 
 pub fn read_xml_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
-    let path = path.as_ref();
-    let input = std::fs::read(path)
-        .with_context(|| format!("failed to read XML input {}", path.display()))?;
-    read_xml_bytes(&input, &path.display().to_string())
+    read_file(path, Some(InputFormat::Xml))
 }
 
 fn toml_value_to_json_rows(value: toml::Value) -> anyhow::Result<Vec<JsonValue>> {
@@ -145,10 +184,13 @@ fn toml_value_to_json_rows(value: toml::Value) -> anyhow::Result<Vec<JsonValue>>
     Ok(vec![JsonValue::Object(flatten_json_object(map))])
 }
 
-fn read_bytes(input: &[u8], format: InputFormat, label: &str) -> anyhow::Result<DataFrame> {
+pub fn read_bytes(input: &[u8], format: InputFormat, label: &str) -> anyhow::Result<DataFrame> {
     match format {
-        InputFormat::Csv => read_csv_bytes(input),
-        InputFormat::Json => read_json_bytes(input),
+        InputFormat::Csv => read_delimited_bytes(input, b','),
+        InputFormat::Tsv => read_delimited_bytes(input, b'\t'),
+        InputFormat::Json => read_json_bytes(input, label),
+        InputFormat::Jsonl => read_jsonl_bytes(input, label),
+        InputFormat::Yaml => read_yaml_bytes(input, label),
         InputFormat::Text => read_text_bytes(input, label),
         InputFormat::Toml => read_toml_bytes(input, label),
         InputFormat::Table => read_table_bytes(input, label),
@@ -160,16 +202,44 @@ fn read_bytes(input: &[u8], format: InputFormat, label: &str) -> anyhow::Result<
     }
 }
 
-fn read_csv_bytes(input: &[u8]) -> anyhow::Result<DataFrame> {
+fn read_delimited_bytes(input: &[u8], separator: u8) -> anyhow::Result<DataFrame> {
     polars::prelude::CsvReader::new(Cursor::new(input))
-        .with_options(CsvReadOptions::default().with_has_header(true))
+        .with_options(
+            CsvReadOptions::default()
+                .with_has_header(true)
+                .map_parse_options(|options| options.with_separator(separator)),
+        )
         .finish()
         .map_err(Into::into)
 }
 
-fn read_json_bytes(input: &[u8]) -> anyhow::Result<DataFrame> {
-    let mut cursor = Cursor::new(input);
-    JsonReader::new(&mut cursor).finish().map_err(Into::into)
+fn read_json_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
+    let value: JsonValue = serde_json::from_slice(input)
+        .with_context(|| format!("failed to parse JSON input {label}"))?;
+    json_value_to_dataframe(value)
+}
+
+fn read_jsonl_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
+    let text = input_as_utf8(input, label)?;
+    let mut values = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let value = serde_json::from_str(line).with_context(|| {
+            format!("failed to parse JSONL input {label} at line {}", index + 1)
+        })?;
+        values.push(value);
+    }
+    json_values_to_dataframe(values)
+}
+
+fn read_yaml_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
+    let text = input_as_utf8(input, label)?;
+    let value: JsonValue = yaml_serde::from_str(text)
+        .with_context(|| format!("failed to parse YAML input {label}"))?;
+    json_value_to_dataframe(value)
 }
 
 fn read_text_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
@@ -214,9 +284,31 @@ fn read_xml_bytes(input: &[u8], label: &str) -> anyhow::Result<DataFrame> {
     json_rows_to_dataframe(rows)
 }
 
+fn json_value_to_dataframe(value: JsonValue) -> anyhow::Result<DataFrame> {
+    match value {
+        JsonValue::Array(values) => json_values_to_dataframe(values),
+        JsonValue::Object(_) => json_rows_to_dataframe(vec![value]),
+        scalar => json_rows_to_dataframe(vec![JsonValue::Object(JsonMap::from_iter([(
+            "value".to_owned(),
+            scalar,
+        )]))]),
+    }
+}
+
+fn json_values_to_dataframe(values: Vec<JsonValue>) -> anyhow::Result<DataFrame> {
+    let rows = values
+        .into_iter()
+        .map(|value| match value {
+            JsonValue::Object(_) => value,
+            scalar => JsonValue::Object(JsonMap::from_iter([("value".to_owned(), scalar)])),
+        })
+        .collect();
+    json_rows_to_dataframe(rows)
+}
+
 fn json_rows_to_dataframe(rows: Vec<JsonValue>) -> anyhow::Result<DataFrame> {
     if rows.is_empty() {
-        bail!("input did not contain any rows");
+        return Ok(DataFrame::empty());
     }
 
     let json = serde_json::to_vec(&rows)?;
@@ -516,6 +608,91 @@ fn flatten_json_value(out: &mut JsonMap<String, JsonValue>, path: String, value:
             }
         }
     }
+}
+
+fn looks_like_json_lines(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    lines.len() > 1
+        && lines
+            .iter()
+            .all(|line| serde_json::from_str::<JsonValue>(line).is_ok())
+}
+
+fn looks_like_markdown_table(text: &str) -> bool {
+    let lines = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(2)
+        .collect::<Vec<_>>();
+    lines.len() == 2 && lines[0].contains('|') && lines[1].contains('|') && lines[1].contains("---")
+}
+
+fn looks_like_delimited(text: &str, separator: char) -> bool {
+    let mut widths = Vec::new();
+    let mut fields = 1usize;
+    let mut in_quotes = false;
+    let mut record_has_content = false;
+    let mut chars = text.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        match character {
+            '"' if in_quotes && chars.peek() == Some(&'"') => {
+                chars.next();
+                record_has_content = true;
+            }
+            '"' => {
+                in_quotes = !in_quotes;
+                record_has_content = true;
+            }
+            value if value == separator && !in_quotes => {
+                fields += 1;
+                record_has_content = true;
+            }
+            '\n' if !in_quotes => {
+                if record_has_content {
+                    widths.push(fields);
+                }
+                fields = 1;
+                record_has_content = false;
+                if widths.len() == 8 {
+                    break;
+                }
+            }
+            '\r' if !in_quotes => {}
+            value if !value.is_whitespace() => record_has_content = true,
+            _ => {}
+        }
+    }
+
+    if record_has_content && widths.len() < 8 {
+        widths.push(fields);
+    }
+
+    widths.len() >= 2 && widths[0] > 1 && widths.iter().all(|width| *width == widths[0])
+}
+
+fn looks_like_toml(text: &str) -> bool {
+    text.lines().map(str::trim).any(|line| {
+        (line.starts_with('[') && line.ends_with(']'))
+            || line
+                .split_once('=')
+                .is_some_and(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
+    })
+}
+
+fn looks_like_yaml(text: &str) -> bool {
+    text.starts_with("---")
+        || text.lines().map(str::trim_start).any(|line| {
+            line.starts_with("- ")
+                || line
+                    .split_once(':')
+                    .is_some_and(|(key, value)| !key.trim().is_empty() && !value.trim().is_empty())
+        })
 }
 
 fn join_path(prefix: &str, key: &str) -> String {
