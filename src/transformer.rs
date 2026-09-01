@@ -38,10 +38,21 @@ impl From<JsonFormat> for PlJsonFormat {
 }
 
 pub fn to_csv(df: &mut DataFrame, include_header: Option<bool>) -> anyhow::Result<String> {
+    to_delimited(df, b',', include_header.unwrap_or(true))
+}
+
+pub fn to_tsv(df: &mut DataFrame, include_header: Option<bool>) -> anyhow::Result<String> {
+    to_delimited(df, b'\t', include_header.unwrap_or(true))
+}
+
+fn to_delimited(df: &mut DataFrame, separator: u8, include_header: bool) -> anyhow::Result<String> {
+    if df.width() == 0 {
+        return Ok(String::new());
+    }
     let mut writer = Vec::new();
     CsvWriter::new(&mut writer)
-        .include_header(include_header.unwrap_or(true))
-        .with_separator(b',')
+        .include_header(include_header)
+        .with_separator(separator)
         .with_quote_style(QuoteStyle::Necessary)
         .finish(df)
         .map_err(|e| anyhow::anyhow!(e))?;
@@ -57,7 +68,82 @@ pub fn to_json(df: &mut DataFrame, format: Option<JsonFormat>) -> anyhow::Result
     Ok(String::from_utf8(writer)?)
 }
 
+pub fn to_pretty_json(df: &mut DataFrame) -> anyhow::Result<String> {
+    let value = dataframe_to_json_value(df)?;
+    serde_json::to_string_pretty(&value).map_err(Into::into)
+}
+
+pub fn to_yaml(df: &mut DataFrame) -> anyhow::Result<String> {
+    let value = dataframe_to_json_value(df)?;
+    yaml_serde::to_string(&value).map_err(Into::into)
+}
+
+pub fn to_toml(df: &mut DataFrame) -> anyhow::Result<String> {
+    let value = dataframe_to_json_value(df)?;
+    let value = match value {
+        serde_json::Value::Array(mut rows) if rows.len() == 1 => rows.remove(0),
+        serde_json::Value::Array(rows) => serde_json::json!({ "rows": rows }),
+        value => value,
+    };
+    toml::to_string_pretty(&value).context("dataframe cannot be represented as TOML")
+}
+
+pub fn to_table(df: &mut DataFrame) -> anyhow::Result<String> {
+    if df.width() == 0 {
+        return Ok(String::new());
+    }
+    let (headers, rows) = dataframe_to_string_rows(df)?;
+    let rows = rows
+        .into_iter()
+        .map(|row| {
+            row.into_iter()
+                .map(|cell| cell.replace('\n', "\\n"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let widths = (0..headers.len())
+        .map(|column| {
+            rows.iter()
+                .filter_map(|row| row.get(column))
+                .map(|cell| cell.chars().count())
+                .chain(std::iter::once(headers[column].chars().count()))
+                .max()
+                .unwrap_or(0)
+        })
+        .collect::<Vec<_>>();
+
+    let render_row = |row: &[String]| {
+        row.iter()
+            .enumerate()
+            .map(|(index, cell)| format!("{cell:<width$}", width = widths[index]))
+            .collect::<Vec<_>>()
+            .join("  ")
+            .trim_end()
+            .to_owned()
+    };
+
+    let mut output = Vec::with_capacity(rows.len() + 2);
+    output.push(render_row(&headers));
+    output.push(
+        widths
+            .iter()
+            .map(|width| "-".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("  "),
+    );
+    output.extend(rows.iter().map(|row| render_row(row)));
+    Ok(output.join("\n"))
+}
+
+pub fn dataframe_to_json_value(df: &mut DataFrame) -> anyhow::Result<serde_json::Value> {
+    let json = to_json(df, Some(JsonFormat::Json))?;
+    serde_json::from_str(&json).context("failed to convert dataframe to a JSON value")
+}
+
 pub fn to_markdown(df: &mut DataFrame) -> anyhow::Result<String> {
+    if df.width() == 0 {
+        return Ok(String::new());
+    }
     let (headers, rows) = dataframe_to_string_rows(df)?;
     let mut lines = Vec::with_capacity(rows.len() + 2);
     lines.push(format!(
@@ -83,6 +169,9 @@ pub fn to_markdown(df: &mut DataFrame) -> anyhow::Result<String> {
 }
 
 pub fn to_text_lines(df: &mut DataFrame) -> anyhow::Result<String> {
+    if df.width() == 0 && df.height() == 0 {
+        return Ok(String::new());
+    }
     if df.width() != 1 {
         bail!("plain text output requires exactly one column");
     }
@@ -95,10 +184,19 @@ pub fn to_text_lines(df: &mut DataFrame) -> anyhow::Result<String> {
         lines.push(render_any_value(column.get(idx)?));
     }
 
-    Ok(lines.join("\n"))
+    if lines.is_empty() {
+        Ok(String::new())
+    } else {
+        let mut output = lines.join("\n");
+        output.push('\n');
+        Ok(output)
+    }
 }
 
 pub fn to_html(df: &mut DataFrame) -> anyhow::Result<String> {
+    if df.width() == 0 {
+        return Ok("<table></table>".to_owned());
+    }
     let (headers, rows) = dataframe_to_string_rows(df)?;
     let head = headers
         .iter()
@@ -121,6 +219,9 @@ pub fn to_html(df: &mut DataFrame) -> anyhow::Result<String> {
 }
 
 pub fn to_xml(df: &mut DataFrame) -> anyhow::Result<String> {
+    if df.width() == 0 {
+        return Ok("<rows></rows>".to_owned());
+    }
     let (headers, rows) = dataframe_to_string_rows(df)?;
     let body = rows
         .into_iter()
