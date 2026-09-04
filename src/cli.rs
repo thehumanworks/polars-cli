@@ -742,6 +742,7 @@ fn output_format_from_path(path: &Path) -> Option<OutputFormat> {
 }
 
 fn write_output(path: Option<&Path>, output: String) -> anyhow::Result<()> {
+    let output = terminate_rendered_output(output);
     match path {
         Some(path) if path != Path::new("-") => std::fs::write(path, output)
             .with_context(|| format!("failed to write output {}", path.display())),
@@ -754,6 +755,17 @@ fn write_output(path: Option<&Path>, output: String) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// Make non-empty rendered output a POSIX text stream without inventing a blank record.
+///
+/// Formats that already terminate the last record (JSONL, CSV, `--raw`) are left unchanged.
+/// Empty output stays empty so a zero-row JSONL wire stays schema-less.
+fn terminate_rendered_output(mut output: String) -> String {
+    if !output.is_empty() && !output.ends_with('\n') {
+        output.push('\n');
+    }
+    output
 }
 
 fn parse_table_spec(spec: &str) -> anyhow::Result<(&str, &Path)> {
@@ -780,4 +792,24 @@ fn looks_like_path(input: &str) -> bool {
         || input.starts_with('.')
         || input.starts_with('~')
         || Path::new(input).extension().is_some()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminate_rendered_output;
+
+    #[test]
+    fn terminate_rendered_output_leaves_empty_output_empty() {
+        assert_eq!(terminate_rendered_output(String::new()), "");
+    }
+
+    #[test]
+    fn terminate_rendered_output_appends_a_newline_when_missing() {
+        assert_eq!(terminate_rendered_output("[]".to_owned()), "[]\n");
+    }
+
+    #[test]
+    fn terminate_rendered_output_does_not_add_a_second_newline() {
+        assert_eq!(terminate_rendered_output("Ada\n".to_owned()), "Ada\n");
+    }
 }

@@ -103,6 +103,11 @@ Output selection follows this precedence:
 Supported outputs are `csv`, `tsv`, `json`, `jsonl`/`ndjson`, `yaml`/`yml`,
 `toml`, `markdown`, `table`, `text`, `html`, and `xml`.
 
+Non-empty rendered output is a POSIX text stream: it ends in exactly one newline.
+Formats that already terminate the last record (JSONL, CSV/TSV, `--raw`) are not
+given a second one. Input is not start/end-trimmed, because leading blank text
+lines and trailing spaces in `--raw` values are data.
+
 `--raw` requires exactly one column and emits one newline-terminated value per row, which makes it
 suitable for `read`, `mapfile`, `while read`, and command substitution.
 `--pretty` formats JSON arrays. `--no-header` applies to CSV and TSV. `-o -`

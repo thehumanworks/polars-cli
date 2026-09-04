@@ -78,6 +78,21 @@ fn read_text_file_creates_a_single_line_column() -> Result<()> {
 }
 
 #[test]
+fn read_text_bytes_keep_leading_blank_lines_and_trailing_spaces() -> Result<()> {
+    let mut df = read_bytes(b"\n  Ada  \n", InputFormat::Text, "fixture")?;
+
+    assert_eq!(
+        as_json(&mut df)?,
+        json!([
+            {"line": ""},
+            {"line": "  Ada  "}
+        ])
+    );
+
+    Ok(())
+}
+
+#[test]
 fn read_markdown_file_parses_the_first_table() -> Result<()> {
     let dir = TempDir::new()?;
     let path = write_fixture(

@@ -133,7 +133,7 @@ fn cli_converts_html_document_to_markdown() -> Result<()> {
         .arg("markdown")
         .assert()
         .success()
-        .stdout(predicate::eq("# Hello\n\nWorld"));
+        .stdout(predicate::eq("# Hello\n\nWorld\n"));
 
     Ok(())
 }
@@ -153,7 +153,7 @@ fn cli_ignores_style_tag_content_when_converting_html_to_markdown() -> Result<()
         .arg("markdown")
         .assert()
         .success()
-        .stdout(predicate::eq("# Hello\n\nWorld"));
+        .stdout(predicate::eq("# Hello\n\nWorld\n"));
 
     Ok(())
 }
@@ -173,7 +173,7 @@ fn cli_ignores_title_tag_content_when_converting_html_to_markdown() -> Result<()
         .arg("markdown")
         .assert()
         .success()
-        .stdout(predicate::eq("# Hello\n\nWorld"));
+        .stdout(predicate::eq("# Hello\n\nWorld\n"));
 
     Ok(())
 }
@@ -193,7 +193,7 @@ fn cli_ignores_common_non_content_tags_when_converting_html_to_markdown() -> Res
         .arg("markdown")
         .assert()
         .success()
-        .stdout(predicate::eq("# Hello\n\nWorld"));
+        .stdout(predicate::eq("# Hello\n\nWorld\n"));
 
     Ok(())
 }
@@ -247,7 +247,7 @@ fn cli_converts_html_table_to_markdown_when_forced_to_table() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::eq(
-            "| name | count |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |",
+            "| name | count |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |\n",
         ));
 
     Ok(())
@@ -313,7 +313,7 @@ fn cli_converts_csv_to_markdown() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::eq(
-            "| name | count |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |",
+            "| name | count |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |\n",
         ));
 
     Ok(())
@@ -363,7 +363,7 @@ fn cli_converts_csv_to_html() -> Result<()> {
         .assert()
         .success()
         .stdout(predicate::eq(
-            "<table><thead><tr><th>name</th><th>count</th></tr></thead><tbody><tr><td>alpha</td><td>1</td></tr><tr><td>beta</td><td>2</td></tr></tbody></table>",
+            "<table><thead><tr><th>name</th><th>count</th></tr></thead><tbody><tr><td>alpha</td><td>1</td></tr><tr><td>beta</td><td>2</td></tr></tbody></table>\n",
         ));
 
     Ok(())
@@ -584,7 +584,7 @@ fn cli_sql_defaults_to_markdown_output() -> Result<()> {
         .arg("SELECT name FROM people")
         .assert()
         .success()
-        .stdout(predicate::eq("| name |\n| --- |\n| alice |"));
+        .stdout(predicate::eq("| name |\n| --- |\n| alice |\n"));
 
     Ok(())
 }
@@ -992,7 +992,7 @@ fn cli_treats_output_dash_as_stdout() -> Result<()> {
         ])
         .assert()
         .success()
-        .stdout(predicate::eq("[{\"name\":\"Ada\"}]"));
+        .stdout(predicate::eq("[{\"name\":\"Ada\"}]\n"));
     Ok(())
 }
 
@@ -1030,7 +1030,7 @@ fn cli_propagates_zero_row_results_through_real_process_pipes() -> Result<()> {
     );
     assert!(select.wait()?.success());
     assert!(filter.wait()?.success());
-    assert_eq!(String::from_utf8(output.stdout)?, "[]");
+    assert_eq!(String::from_utf8(output.stdout)?, "[]\n");
     Ok(())
 }
 
@@ -1068,7 +1068,7 @@ fn cli_global_to_overrides_the_to_subcommand_format() -> Result<()> {
         .write_stdin("{\"name\":\"Ada\"}\n")
         .assert()
         .success()
-        .stdout(predicate::eq("[{\"name\":\"Ada\"}]"));
+        .stdout(predicate::eq("[{\"name\":\"Ada\"}]\n"));
     Ok(())
 }
 
@@ -1084,5 +1084,131 @@ fn cli_still_requires_join_keys_when_an_input_is_empty() -> Result<()> {
         .stderr(predicate::str::contains(
             "join requires --on or matching --left-on/--right-on keys",
         ));
+    Ok(())
+}
+
+#[test]
+fn cli_terminates_json_stdout_with_a_single_newline() -> Result<()> {
+    cmd()?
+        .args(["--data", r#"[{"name":"Ada"}]"#, "--to", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[{\"name\":\"Ada\"}]\n"));
+    Ok(())
+}
+
+#[test]
+fn cli_terminates_table_markdown_html_and_xml_stdout_with_a_single_newline() -> Result<()> {
+    let data = r#"[{"name":"Ada"}]"#;
+
+    cmd()?
+        .args(["--data", data, "--to", "table"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("name\n----\nAda\n"));
+
+    cmd()?
+        .args(["--data", data, "--to", "markdown"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("| name |\n| --- |\n| Ada |\n"));
+
+    cmd()?
+        .args(["--data", data, "--to", "html"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "<table><thead><tr><th>name</th></tr></thead><tbody><tr><td>Ada</td></tr></tbody></table>\n",
+        ));
+
+    cmd()?
+        .args(["--data", data, "--to", "xml"])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "<rows><row><field name=\"name\">Ada</field></row></rows>\n",
+        ));
+    Ok(())
+}
+
+#[test]
+fn cli_pretty_json_ends_with_a_single_newline() -> Result<()> {
+    let stdout = cmd()?
+        .args(["--data", r#"[{"name":"Ada"}]"#, "--pretty"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stdout = String::from_utf8(stdout)?;
+    assert!(stdout.ends_with('\n'), "{stdout:?}");
+    assert!(!stdout.ends_with("\n\n"), "{stdout:?}");
+    Ok(())
+}
+
+#[test]
+fn cli_writes_json_files_with_a_trailing_newline() -> Result<()> {
+    let dir = TempDir::new()?;
+    let output = dir.path().join("people.json");
+    cmd()?
+        .args(["--data", r#"[{"name":"Ada"}]"#, "--output"])
+        .arg(&output)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty());
+    assert_eq!(std::fs::read_to_string(output)?, "[{\"name\":\"Ada\"}]\n");
+    Ok(())
+}
+
+#[test]
+fn cli_keeps_significant_text_whitespace_when_reading_stdin() -> Result<()> {
+    let assert = cmd()?
+        .args(["--from", "text", "--to", "json"])
+        .write_stdin("  Ada  \n")
+        .assert()
+        .success();
+    assert_eq!(
+        String::from_utf8(assert.get_output().stdout.clone())?,
+        "[{\"line\":\"  Ada  \"}]\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_keeps_a_leading_blank_text_line_when_reading_stdin() -> Result<()> {
+    let assert = cmd()?
+        .args(["--from", "text", "--to", "json"])
+        .write_stdin("\nAda\n")
+        .assert()
+        .success();
+    assert_eq!(
+        String::from_utf8(assert.get_output().stdout.clone())?,
+        "[{\"line\":\"\"},{\"line\":\"Ada\"}]\n"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_chains_json_with_a_trailing_newline_through_a_real_pipe() -> Result<()> {
+    let binary = env!("CARGO_BIN_EXE_pl");
+
+    let mut first = StdCommand::new(binary)
+        .args(["--data", r#"[{"name":"Ada","age":36}]"#, "--to", "json"])
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let first_stdout = first.stdout.take().expect("first stdout must be piped");
+
+    let output = StdCommand::new(binary)
+        .args(["select", "name", "--raw"])
+        .stdin(Stdio::from(first_stdout))
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(first.wait()?.success());
+    assert_eq!(String::from_utf8(output.stdout)?, "Ada\n");
     Ok(())
 }
