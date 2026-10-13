@@ -2,10 +2,13 @@ use std::{borrow::Cow, fmt::Display};
 
 use anyhow::{Context, bail};
 use htmd::HtmlToMarkdown;
+use polars::io::avro::{AvroCompression, AvroWriter};
 use polars::prelude::{AnyValue, SerWriter};
 use polars::{
     frame::DataFrame,
-    prelude::{CsvWriter, JsonFormat as PlJsonFormat, JsonWriter, QuoteStyle},
+    prelude::{
+        CsvWriter, IpcWriter, JsonFormat as PlJsonFormat, JsonWriter, ParquetWriter, QuoteStyle,
+    },
 };
 
 const HTML_MARKDOWN_SKIP_TAGS: &[&str] = &[
@@ -45,7 +48,12 @@ pub fn to_tsv(df: &mut DataFrame, include_header: Option<bool>) -> anyhow::Resul
     to_delimited(df, b'\t', include_header.unwrap_or(true))
 }
 
-fn to_delimited(df: &mut DataFrame, separator: u8, include_header: bool) -> anyhow::Result<String> {
+/// Render delimited text with an arbitrary single-byte separator.
+pub fn to_delimited(
+    df: &mut DataFrame,
+    separator: u8,
+    include_header: bool,
+) -> anyhow::Result<String> {
     if df.width() == 0 {
         return Ok(String::new());
     }
@@ -57,6 +65,43 @@ fn to_delimited(df: &mut DataFrame, separator: u8, include_header: bool) -> anyh
         .finish(df)
         .map_err(|e| anyhow::anyhow!(e))?;
     Ok(String::from_utf8(writer)?)
+}
+
+pub fn to_parquet(df: &mut DataFrame) -> anyhow::Result<Vec<u8>> {
+    let mut writer = Vec::new();
+    ParquetWriter::new(&mut writer)
+        .finish(df)
+        .context("failed to write Parquet output")?;
+    Ok(writer)
+}
+
+/// Render the Arrow IPC file format (also known as Feather v2).
+pub fn to_arrow(df: &mut DataFrame) -> anyhow::Result<Vec<u8>> {
+    let mut writer = Vec::new();
+    IpcWriter::new(&mut writer)
+        .finish(df)
+        .context("failed to write Arrow IPC output")?;
+    Ok(writer)
+}
+
+pub fn to_avro(
+    df: &mut DataFrame,
+    compression: Option<AvroCompression>,
+) -> anyhow::Result<Vec<u8>> {
+    // Multi-chunk frames, such as those from the CSV reader, otherwise produce Avro files that
+    // Polars cannot read back.
+    df.rechunk_mut();
+    let mut writer = Vec::new();
+    AvroWriter::new(&mut writer)
+        .with_compression(compression)
+        .finish(df)
+        .context("failed to write Avro output")?;
+    Ok(writer)
+}
+
+/// Render Polars' native display format, as `polars into-repr` does in Nushell.
+pub fn to_repr(df: &DataFrame) -> String {
+    df.to_string()
 }
 
 pub fn to_json(df: &mut DataFrame, format: Option<JsonFormat>) -> anyhow::Result<String> {

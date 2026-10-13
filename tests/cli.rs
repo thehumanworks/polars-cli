@@ -1212,3 +1212,1348 @@ fn cli_chains_json_with_a_trailing_newline_through_a_real_pipe() -> Result<()> {
     assert_eq!(String::from_utf8(output.stdout)?, "Ada\n");
     Ok(())
 }
+
+const PEOPLE: &str = r#"[
+  {"name":"Ada","team":"red","age":36,"score":9.5,"joined":"2021-03-05"},
+  {"name":"Bob","team":"blue","age":null,"score":7.25,"joined":"2022-11-30"},
+  {"name":"Cy","team":"red","age":25,"score":8.0,"joined":"2020-01-15"},
+  {"name":"Di","team":"blue","age":41,"score":null,"joined":"2023-07-04"}
+]"#;
+
+/// Run `pl ARGS --data DATA --to json` and parse stdout.
+fn json_for(data: &str, args: &[&str]) -> Result<Value> {
+    let assert = cmd()?
+        .args(args)
+        .arg("--data")
+        .arg(data)
+        .arg("--to")
+        .arg("json")
+        .assert()
+        .success();
+    Ok(serde_json::from_slice(&assert.get_output().stdout)?)
+}
+
+/// Run `pl ARGS --data DATA` and return the error message.
+fn error_for(data: &str, args: &[&str]) -> Result<String> {
+    let assert = cmd()?
+        .args(args)
+        .arg("--data")
+        .arg(data)
+        .env("RUST_BACKTRACE", "0")
+        .assert()
+        .failure();
+    Ok(String::from_utf8(assert.get_output().stderr.clone())?)
+}
+
+#[test]
+fn cli_selects_columns_by_type_regex_and_index_selectors() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["select", "type:numeric"])?[0],
+        json!({"age": 36, "score": 9.5})
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["select", "^[nt].*$", "index:-1"])?[0],
+        json!({"name": "Ada", "team": "red", "joined": "2021-03-05"})
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["drop", "type:string"])?[0],
+        json!({"age": 36, "score": 9.5})
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_exact_column_names_win_over_selector_syntax() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"type:odd":1,"x":2}]"#, &["select", "type:odd"])?,
+        json!([{"type:odd": 1}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_column_commands_replace_in_place_or_write_new_columns_with_as() -> Result<()> {
+    let data = r#"[{"a":"x","b":"y","n":1}]"#;
+    assert_eq!(
+        json_for(data, &["uppercase", "a"])?,
+        json!([{"a": "X", "b": "y", "n": 1}])
+    );
+    assert_eq!(
+        json_for(data, &["uppercase", "a", "--as", "a_up"])?,
+        json!([{"a": "x", "b": "y", "n": 1, "a_up": "X"}])
+    );
+    assert_eq!(
+        json_for(data, &["uppercase", "type:string", "--as", "{}_up"])?,
+        json!([{"a": "x", "b": "y", "n": 1, "a_up": "X", "b_up": "Y"}])
+    );
+    assert!(
+        error_for(data, &["uppercase", "a", "b", "--as", "c"])?
+            .contains("--as needs exactly one column")
+    );
+    assert!(error_for(data, &["uppercase", "n"])?.contains("requires a string column"));
+    Ok(())
+}
+
+#[test]
+fn cli_string_commands_replace_slice_split_strip_and_measure() -> Result<()> {
+    let data = r#"[{"s":"  banana  ","t":"a-b-c"}]"#;
+    assert_eq!(
+        json_for(data, &["str-strip-chars", "--whitespace", "s"])?[0]["s"],
+        json!("banana")
+    );
+    assert_eq!(
+        json_for(data, &["str-strip-chars", " a", "s", "--start"])?[0]["s"],
+        json!("banana  ")
+    );
+    assert_eq!(
+        json_for(data, &["str-replace", "-p", "an", "-r", "AN", "s"])?[0]["s"],
+        json!("  bANana  ")
+    );
+    assert_eq!(
+        json_for(data, &["str-replace-all", "-p", "an", "-r", "AN", "s"])?[0]["s"],
+        json!("  bANANa  ")
+    );
+    assert_eq!(
+        json_for(
+            data,
+            &["str-replace-all", "-p", ".", "-r", "", "t", "--literal"]
+        )?[0]["t"],
+        json!("a-b-c")
+    );
+    assert_eq!(
+        json_for(data, &["str-slice", "-3", "t"])?[0]["t"],
+        json!("b-c")
+    );
+    assert_eq!(
+        json_for(data, &["str-slice", "0", "t", "--length", "1"])?[0]["t"],
+        json!("a")
+    );
+    assert_eq!(
+        json_for(data, &["str-split", "-", "t"])?[0]["t"],
+        json!(["a", "b", "c"])
+    );
+    assert_eq!(json_for(data, &["str-lengths", "t"])?[0]["t"], json!(5));
+    assert_eq!(
+        json_for(r#"[{"s":"é"}]"#, &["str-lengths", "--bytes", "s"])?[0]["s"],
+        json!(2)
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"s":"a"},{"s":null},{"s":"b"}]"#,
+            &["str-join", "-d", "+", "--ignore-nulls"]
+        )?,
+        json!([{"s": "a+b"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_mask_commands_produce_boolean_columns() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["contains", "^[AB]", "name", "--as", "ab"])?
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["ab"].clone())
+            .collect::<Vec<_>>(),
+        [json!(true), json!(true), json!(false), json!(false)]
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["is-in", "red,green", "team"])?[1]["team"],
+        json!(false)
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["is-null", "age"])?[1]["age"],
+        json!(true)
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["is-not-null", "score"])?[3]["score"],
+        json!(false)
+    );
+    assert_eq!(
+        json_for(r#"[{"ok":true},{"ok":false}]"#, &["not"])?,
+        json!([{"ok": false}, {"ok": true}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"a":1,"b":1},{"a":1,"b":2},{"a":1,"b":1}]"#,
+            &["is-duplicated"]
+        )?,
+        json!([{"is_duplicated": true}, {"is_duplicated": false}, {"is_duplicated": true}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"a":1,"b":1},{"a":1,"b":2}]"#,
+            &["is-unique", "a", "--as", "u"]
+        )?,
+        json!([{"a": 1, "b": 1, "u": false}, {"a": 1, "b": 2, "u": false}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_temporal_commands_parse_iso_strings_from_json_pipelines() -> Result<()> {
+    let data = r#"[{"d":"2024-03-05"},{"d":"2023-12-31"}]"#;
+    assert_eq!(
+        json_for(data, &["get-year", "d", "--as", "y"])?,
+        json!([{"d": "2024-03-05", "y": 2024}, {"d": "2023-12-31", "y": 2023}])
+    );
+    assert_eq!(json_for(data, &["get-month", "d"])?[0]["d"], json!(3));
+    assert_eq!(json_for(data, &["get-day", "d"])?[0]["d"], json!(5));
+    assert_eq!(json_for(data, &["get-ordinal", "d"])?[1]["d"], json!(365));
+    assert_eq!(json_for(data, &["get-weekday", "d"])?[0]["d"], json!(2));
+    assert_eq!(
+        json_for(data, &["datepart", "quarter", "d"])?[0]["d"],
+        json!(1)
+    );
+    assert_eq!(
+        json_for(data, &["strftime", "%d/%m/%Y", "d"])?[0]["d"],
+        json!("05/03/2024")
+    );
+    assert_eq!(
+        json_for(data, &["truncate", "1mo", "d"])?[0]["d"],
+        json!("2024-03-01")
+    );
+    let times = r#"[{"t":"2024-03-05 13:45:30"}]"#;
+    assert_eq!(json_for(times, &["get-hour", "t"])?[0]["t"], json!(13));
+    assert_eq!(json_for(times, &["get-minute", "t"])?[0]["t"], json!(45));
+    assert_eq!(json_for(times, &["get-second", "t"])?[0]["t"], json!(30));
+    Ok(())
+}
+
+#[test]
+fn cli_parses_dates_and_datetimes_with_formats_and_time_zones() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"d":"05/03/2024"}]"#, &["as-date", "%d/%m/%Y", "d"])?[0]["d"],
+        json!("2024-03-05")
+    );
+    assert!(
+        error_for(r#"[{"d":"2024-03-05"}]"#, &["as-date", "%d/%m/%Y", "d"])?
+            .contains("as-date failed")
+    );
+    let assert = cmd()?
+        .args([
+            "as-datetime",
+            "%Y-%m-%d %H:%M",
+            "t",
+            "--time-zone",
+            "UTC",
+            "--data",
+            r#"[{"t":"2024-07-01 12:00"}]"#,
+            "--to",
+            "arrow",
+        ])
+        .assert()
+        .success();
+    let utc = assert.get_output().stdout.clone();
+    cmd()?
+        .args(["convert-time-zone", "Europe/Paris", "t", "--to", "csv"])
+        .write_stdin(utc.clone())
+        .assert()
+        .success()
+        .stdout(predicate::eq("t\n2024-07-01T14:00:00.000000+0200\n"));
+    cmd()?
+        .args(["replace-time-zone", "null", "t", "--to", "csv"])
+        .write_stdin(utc)
+        .assert()
+        .success()
+        .stdout(predicate::eq("t\n2024-07-01T12:00:00.000000\n"));
+    Ok(())
+}
+
+#[test]
+fn cli_generates_date_and_datetime_ranges_without_reading_input() -> Result<()> {
+    cmd()?
+        .args([
+            "date-range",
+            "--start",
+            "2024-02-27",
+            "--end",
+            "2024-03-01",
+            "--to",
+            "csv",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "date\n2024-02-27\n2024-02-28\n2024-02-29\n2024-03-01\n",
+        ));
+    cmd()?
+        .args([
+            "datetime-range",
+            "--start",
+            "2024-01-01 00:00:00",
+            "--end",
+            "2024-01-01 01:00:00",
+            "--interval",
+            "30m",
+            "--closed",
+            "left",
+            "--as",
+            "at",
+            "--to",
+            "csv",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "at\n2024-01-01T00:00:00.000000\n2024-01-01T00:30:00.000000\n",
+        ));
+    assert_eq!(
+        json_for(
+            r#"[{"a":"2024-01-01","b":"2024-01-03"}]"#,
+            &[
+                "date-ranges",
+                "--start",
+                "a",
+                "--end",
+                "b",
+                "--interval",
+                "2d"
+            ]
+        )?[0]["date_range"],
+        json!(["2024-01-01", "2024-01-03"])
+    );
+    assert!(
+        error_for(
+            "[]",
+            &["date-range", "--start", "2024-01-01", "--end", "2024-01-02"]
+        )?
+        .contains("does not read input")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_aggregations_reduce_columns_to_one_row() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["sum"])?,
+        json!([{"name": null, "team": null, "age": 102, "score": 24.75, "joined": null}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["mean", "age", "score"])?,
+        json!([{"age": 34.0, "score": 8.25}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["min", "name", "age"])?,
+        json!([{"name": "Ada", "age": 25}])
+    );
+    assert_eq!(json_for(PEOPLE, &["max", "age"])?, json!([{"age": 41}]));
+    assert_eq!(
+        json_for(PEOPLE, &["median", "age"])?,
+        json!([{"age": 36.0}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["quantile", "0.5", "age", "--method", "lower"])?,
+        json!([{"age": 36.0}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":1},{"x":3}]"#, &["var"])?,
+        json!([{"x": 2.0}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":1},{"x":3}]"#, &["std", "--ddof", "0"])?,
+        json!([{"x": 1.0}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["n-unique", "team"])?,
+        json!([{"team": 2}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["count-null"])?,
+        json!([{"name": 0, "team": 0, "age": 1, "score": 1, "joined": 0}])
+    );
+    assert_eq!(json_for(PEOPLE, &["count", "age"])?, json!([{"age": 3}]));
+    assert_eq!(json_for(PEOPLE, &["count"])?, json!([{"count": 4}]));
+    assert_eq!(json_for(PEOPLE, &["len"])?, json!([{"len": 4}]));
+    assert_eq!(
+        json_for(
+            r#"[{"a":true,"b":false},{"a":true,"b":false}]"#,
+            &["all-true"]
+        )?,
+        json!([{"a": true, "b": false}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"a":true,"b":false},{"a":true,"b":false}]"#,
+            &["all-false"]
+        )?,
+        json!([{"a": false, "b": true}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["implode", "name"])?,
+        json!([{"name": ["Ada", "Bob", "Cy", "Di"]}])
+    );
+    assert!(error_for(PEOPLE, &["sum", "name"])?.contains("sum does not support \"name\""));
+    Ok(())
+}
+
+#[test]
+fn cli_value_counts_keep_first_appearance_order_and_exact_proportions() -> Result<()> {
+    let data = r#"[{"t":"b"},{"t":"a"},{"t":"a"},{"t":"c"},{"t":"a"}]"#;
+    assert_eq!(
+        json_for(data, &["value-counts"])?,
+        json!([{"t": "b", "count": 1}, {"t": "a", "count": 3}, {"t": "c", "count": 1}])
+    );
+    assert_eq!(
+        json_for(data, &["value-counts", "--sort", "--normalize"])?,
+        json!([
+            {"t": "a", "proportion": 0.6},
+            {"t": "b", "proportion": 0.2},
+            {"t": "c", "proportion": 0.2}
+        ])
+    );
+    assert_eq!(
+        json_for(data, &["value-counts", "t", "--column", "n"])?[0],
+        json!({"t": "b", "n": 1})
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_summary_matches_the_nushell_layout() -> Result<()> {
+    let summary = json_for(r#"[{"a":1,"s":"x"},{"a":3,"s":"y"}]"#, &["summary"])?;
+    let descriptors = summary
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["descriptor"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        descriptors,
+        [
+            "count", "sum", "mean", "median", "std", "min", "25%", "50%", "75%", "max"
+        ]
+    );
+    assert_eq!(summary[0]["a (i64)"], json!(2.0));
+    assert_eq!(summary[2]["a (i64)"], json!(2.0));
+    assert_eq!(summary[4]["a (i64)"], json!(1.0));
+    assert_eq!(summary[1]["s (str)"], json!(null));
+    Ok(())
+}
+
+#[test]
+fn cli_fill_null_and_fill_nan_fill_compatible_columns() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["fill-null", "0"])?[1],
+        json!({"name": "Bob", "team": "blue", "age": 0, "score": 7.25, "joined": "2022-11-30"})
+    );
+    assert_eq!(
+        json_for(r#"[{"s":null,"n":null}]"#, &["fill-null", "n/a", "s"])?,
+        json!([{"s": "n/a", "n": null}])
+    );
+    assert_eq!(
+        json_for(
+            PEOPLE,
+            &["fill-null", "--strategy", "forward", "age", "score"]
+        )?[3],
+        json!({"name": "Di", "team": "blue", "age": 41, "score": 8.0, "joined": "2023-07-04"})
+    );
+    let assert = cmd()?
+        .args(["fill-nan", "0", "--to", "json"])
+        .write_stdin("x,y\n1.5,a\nNaN,b\n")
+        .assert()
+        .success();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&assert.get_output().stdout)?,
+        json!([{"x": 1.5, "y": "a"}, {"x": 0.0, "y": "b"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_cast_is_strict_unless_non_strict() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"v":"1"},{"v":"2"}]"#, &["cast", "i64", "v"])?,
+        json!([{"v": 1}, {"v": 2}])
+    );
+    assert!(error_for(r#"[{"v":"x"}]"#, &["cast", "i64", "v"])?.contains("cast failed"));
+    assert_eq!(
+        json_for(
+            r#"[{"v":"x"},{"v":"2"}]"#,
+            &["cast", "i64", "v", "--non-strict"]
+        )?,
+        json!([{"v": null}, {"v": 2}])
+    );
+    assert!(error_for(r#"[{"v":"1"}]"#, &["cast", "nope", "v"])?.contains("unknown data type"));
+    Ok(())
+}
+
+#[test]
+fn cli_shift_cumulative_and_rolling_compute_window_columns() -> Result<()> {
+    let data = r#"[{"x":1},{"x":2},{"x":3},{"x":4}]"#;
+    assert_eq!(
+        json_for(data, &["shift", "1", "--fill", "0"])?,
+        json!([{"x": 0}, {"x": 1}, {"x": 2}, {"x": 3}])
+    );
+    assert_eq!(
+        json_for(data, &["shift", "-1"])?,
+        json!([{"x": 2}, {"x": 3}, {"x": 4}, {"x": null}])
+    );
+    assert_eq!(
+        json_for(data, &["cumulative", "sum", "x", "--as", "total"])?[3],
+        json!({"x": 4, "total": 10})
+    );
+    assert_eq!(
+        json_for(data, &["cumulative", "max", "--reverse"])?,
+        json!([{"x": 4}, {"x": 4}, {"x": 4}, {"x": 4}])
+    );
+    assert_eq!(
+        json_for(data, &["rolling", "sum", "2"])?,
+        json!([{"x": null}, {"x": 3}, {"x": 5}, {"x": 7}])
+    );
+    assert_eq!(
+        json_for(data, &["rolling", "mean", "2", "--min-periods", "1"])?,
+        json!([{"x": 1.0}, {"x": 1.5}, {"x": 2.5}, {"x": 3.5}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_rolling_group_by_aggregates_over_an_index_column() -> Result<()> {
+    assert_eq!(
+        json_for(
+            r#"[{"t":"2024-01-01","x":1},{"t":"2024-01-02","x":2},{"t":"2024-01-04","x":3}]"#,
+            &[
+                "rolling",
+                "--index-column",
+                "t",
+                "--period",
+                "2d",
+                "--agg",
+                "SUM(x) AS s",
+            ]
+        )?,
+        json!([
+            {"t": "2024-01-01", "s": 1},
+            {"t": "2024-01-02", "s": 3},
+            {"t": "2024-01-04", "s": 3}
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_pivot_and_unpivot_keep_first_appearance_order() -> Result<()> {
+    let long = r#"[
+      {"region":"s","month":"feb","rev":4},
+      {"region":"n","month":"jan","rev":1},
+      {"region":"n","month":"feb","rev":2},
+      {"region":"s","month":"jan","rev":3}
+    ]"#;
+    let wide = json_for(
+        long,
+        &[
+            "pivot", "--on", "month", "--index", "region", "--values", "rev",
+        ],
+    )?;
+    assert_eq!(
+        wide,
+        json!([
+            {"region": "s", "feb": 4, "jan": 3},
+            {"region": "n", "feb": 2, "jan": 1}
+        ])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"r":"n","m":"jan","v":1},{"r":"n","m":"jan","v":2}]"#,
+            &["pivot", "--on", "m", "--index", "r", "--aggregate", "sum"]
+        )?,
+        json!([{"r": "n", "jan": 3}])
+    );
+    assert!(
+        error_for(
+            r#"[{"r":"n","m":"jan","v":1},{"r":"n","m":"jan","v":2}]"#,
+            &["pivot", "--on", "m", "--index", "r"]
+        )?
+        .contains("use --aggregate")
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"id":1,"a":10,"b":20}]"#,
+            &[
+                "unpivot",
+                "--index",
+                "id",
+                "--variable-name",
+                "k",
+                "--value-name",
+                "v"
+            ]
+        )?,
+        json!([{"id": 1, "k": "a", "v": 10}, {"id": 1, "k": "b", "v": 20}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_explode_unnest_and_struct_commands_handle_nested_columns() -> Result<()> {
+    let lists = r#"[{"a":1,"xs":[1,2]},{"a":2,"xs":[]},{"a":3,"xs":null}]"#;
+    assert_eq!(
+        json_for(lists, &["explode"])?,
+        json!([{"a": 1, "xs": 1}, {"a": 1, "xs": 2}])
+    );
+    assert_eq!(
+        json_for(lists, &["flatten", "xs", "--empty-as-null", "--keep-nulls"])?,
+        json!([
+            {"a": 1, "xs": 1},
+            {"a": 1, "xs": 2},
+            {"a": 2, "xs": null},
+            {"a": 3, "xs": null}
+        ])
+    );
+    assert_eq!(
+        json_for(lists, &["list-contains", "2", "xs", "--as", "has2"])?[0]["has2"],
+        json!(true)
+    );
+    let structs = r#"[{"id":1,"s":{"x":1,"y":"q"}}]"#;
+    assert_eq!(
+        json_for(structs, &["unnest"])?,
+        json!([{"id": 1, "x": 1, "y": "q"}])
+    );
+    assert_eq!(
+        json_for(structs, &["unnest", "s", "--separator", "."])?,
+        json!([{"id": 1, "s.x": 1, "s.y": "q"}])
+    );
+    assert_eq!(
+        json_for(structs, &["struct-json-encode", "s"])?,
+        json!([{"id": 1, "s": "{\"x\":1,\"y\":\"q\"}"}])
+    );
+    assert_eq!(
+        json_for(r#"{"a":[1,2],"b":["x","y"]}"#, &["into-df", "--as-columns"])?,
+        json!([{"a": 1, "b": "x"}, {"a": 2, "b": "y"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_dummies_one_hot_encode_selected_columns() -> Result<()> {
+    assert_eq!(
+        json_for(
+            r#"[{"t":"red","n":1},{"t":"blue","n":2}]"#,
+            &["dummies", "t", "--separator", ":"]
+        )?,
+        json!([{"t:blue": 0, "t:red": 1, "n": 1}, {"t:blue": 1, "t:red": 0, "n": 2}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_append_adds_columns_by_default_and_rows_with_col() -> Result<()> {
+    let left = r#"[{"a":1},{"a":2}]"#;
+    let right = r#"[{"a":9},{"a":8}]"#;
+    assert_eq!(
+        json_for(left, &["append", right])?,
+        json!([{"a": 1, "a_x": 9}, {"a": 2, "a_x": 8}])
+    );
+    assert_eq!(
+        json_for(left, &["append", right, "--col"])?,
+        json!([{"a": 1}, {"a": 2}, {"a": 9}, {"a": 8}])
+    );
+    assert!(error_for(left, &["append", r#"[{"b":1}]"#])?.contains("equal row counts"));
+    Ok(())
+}
+
+#[test]
+fn cli_take_and_sample_select_rows() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["take", "0", "-1", "1"])?
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect::<Vec<_>>(),
+        [json!("Ada"), json!("Di"), json!("Bob")]
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["take", "[2,0]"])?[0]["name"],
+        json!("Cy")
+    );
+    let first = json_for(PEOPLE, &["sample", "-n", "3", "--seed", "11"])?;
+    let second = json_for(PEOPLE, &["sample", "-n", "3", "--seed", "11"])?;
+    assert_eq!(first.as_array().unwrap().len(), 3);
+    assert_eq!(first, second);
+    assert_eq!(
+        json_for(PEOPLE, &["sample", "--fraction", "0.5", "--seed", "1"])?
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(error_for(PEOPLE, &["take", "9"])?.contains("out of range"));
+    assert!(error_for(PEOPLE, &["sample", "-n", "9"])?.contains("without --replace"));
+    Ok(())
+}
+
+#[test]
+fn cli_join_supports_semi_anti_right_and_custom_suffixes() -> Result<()> {
+    let left = r#"[{"id":1,"v":"a"},{"id":2,"v":"b"},{"id":3,"v":"c"}]"#;
+    let right = r#"[{"id":2,"v":"x"},{"id":4,"v":"y"}]"#;
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "id", "--how", "semi"])?,
+        json!([{"id": 2, "v": "b"}])
+    );
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "id", "--how", "anti"])?,
+        json!([{"id": 1, "v": "a"}, {"id": 3, "v": "c"}])
+    );
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "id", "--how", "right"])?,
+        json!([{"id": 2, "v": "b", "v_right": "x"}, {"id": 4, "v": null, "v_right": "y"}])
+    );
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "id", "--suffix", "_r"])?,
+        json!([{"id": 2, "v": "b", "v_r": "x"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_join_where_matches_inequality_predicates_in_left_row_order() -> Result<()> {
+    assert_eq!(
+        json_for(
+            r#"[{"name":"Bob","cash":10},{"name":"Alice","cash":5}]"#,
+            &[
+                "join-where",
+                r#"[{"item":"C","price":12},{"item":"A","price":3},{"item":"B","price":7}]"#,
+                "cash > price",
+            ]
+        )?,
+        json!([
+            {"name": "Bob", "cash": 10, "item": "A", "price": 3},
+            {"name": "Bob", "cash": 10, "item": "B", "price": 7},
+            {"name": "Alice", "cash": 5, "item": "A", "price": 3}
+        ])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_concat_diagonal_aligns_columns_by_name() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"a":1}]"#, &["concat", "--diagonal", r#"[{"b":"x"}]"#])?,
+        json!([{"a": 1, "b": null}, {"a": null, "b": "x"}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"a":1}]"#,
+            &["concat", "--to-supertypes", r#"[{"a":1.5}]"#]
+        )?,
+        json!([{"a": 1.0}, {"a": 1.5}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_set_and_set_with_idx_overwrite_selected_rows() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["set", "0", "age", "--mask", "age > 30"])?
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["age"].clone())
+            .collect::<Vec<_>>(),
+        [json!(0), json!(null), json!(25), json!(0)]
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["set-with-idx", "X", "name", "--indices", "0,-1"])?
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["name"].clone())
+            .collect::<Vec<_>>(),
+        [json!("X"), json!("Bob"), json!("Cy"), json!("X")]
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_replace_maps_values_from_lists_or_a_json_object() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["replace", "red,blue", "R,B", "team"])?[1]["team"],
+        json!("B")
+    );
+    let mapped = json_for(
+        PEOPLE,
+        &[
+            "replace",
+            "--map",
+            r#"{"red":"R"}"#,
+            "--default",
+            "other",
+            "team",
+        ],
+    )?;
+    assert_eq!(mapped[0]["team"], json!("R"));
+    assert_eq!(mapped[1]["team"], json!("other"));
+    assert!(
+        error_for(
+            PEOPLE,
+            &["replace", "--map", r#"{"red":"R"}"#, "--strict", "team"]
+        )?
+        .contains("replace failed")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_cut_and_qcut_bin_numeric_columns() -> Result<()> {
+    let data = r#"[{"x":1},{"x":5},{"x":9}]"#;
+    assert_eq!(
+        json_for(data, &["cut", "3,6", "x", "--labels", "lo,mid,hi"])?,
+        json!([{"x": "lo"}, {"x": "mid"}, {"x": "hi"}])
+    );
+    assert_eq!(
+        json_for(data, &["cut", "5", "x", "--left-closed"])?[1]["x"],
+        json!("[5, inf)")
+    );
+    assert_eq!(
+        json_for(
+            data,
+            &["qcut", "2", "x", "--labels", "low,high", "--as", "half"]
+        )?
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["half"].clone())
+        .collect::<Vec<_>>(),
+        [json!("low"), json!("low"), json!("high")]
+    );
+    assert!(error_for(data, &["cut", "3", "x", "--labels", "a"])?.contains("label"));
+    Ok(())
+}
+
+#[test]
+fn cli_integer_and_decimal_parse_strings() -> Result<()> {
+    assert_eq!(
+        json_for(
+            r#"[{"h":"ff"},{"h":"zz"}]"#,
+            &["integer", "--base", "16", "h"]
+        )?,
+        json!([{"h": 255}, {"h": null}])
+    );
+    assert!(
+        error_for(r#"[{"h":"zz"}]"#, &["integer", "--strict", "h"])?.contains("integer failed")
+    );
+    assert_eq!(
+        json_for(r#"[{"d":"1.5"}]"#, &["decimal", "2", "d"])?,
+        json!([{"d": "1.50"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_math_subcommands_compute_elementwise_and_aggregate_values() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"x":-4},{"x":9}]"#, &["math", "abs"])?,
+        json!([{"x": 4}, {"x": 9}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":4},{"x":9}]"#, &["math", "sqrt", "x", "--as", "r"])?[1]["r"],
+        json!(3.0)
+    );
+    assert_eq!(
+        json_for(r#"[{"x":8}]"#, &["math", "log", "--base", "2"])?,
+        json!([{"x": 3.0}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":-2},{"x":0}]"#, &["math", "sign"])?,
+        json!([{"x": -1}, {"x": 0}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"a":1,"b":2},{"a":3,"b":4}]"#,
+            &["math", "dot", "a", "b"]
+        )?,
+        json!([{"dot": 14}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":6},{"x":3}]"#, &["math", "bitwise-and"])?,
+        json!([{"x": 2}])
+    );
+    assert_eq!(
+        json_for(r#"[{"x":7}]"#, &["math", "bitwise-count-ones"])?,
+        json!([{"x": 3}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_arg_commands_return_row_indices() -> Result<()> {
+    assert_eq!(
+        json_for(PEOPLE, &["arg-max", "age", "score"])?,
+        json!([{"age": 3, "score": 0}])
+    );
+    assert_eq!(json_for(PEOPLE, &["arg-min", "age"])?, json!([{"age": 2}]));
+    assert_eq!(
+        json_for(PEOPLE, &["arg-where", "age > 30"])?,
+        json!([{"arg_where": 0}, {"arg_where": 3}])
+    );
+    assert_eq!(
+        json_for(r#"[{"b":false},{"b":true},{"b":true}]"#, &["arg-true"])?,
+        json!([{"arg_true": 1}, {"arg_true": 2}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["arg-unique", "team"])?,
+        json!([{"arg_unique": 0}, {"arg_unique": 1}])
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["arg-sort", "name", "--reverse", "--limit", "2"])?,
+        json!([{"arg_sort": 3}, {"arg_sort": 2}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_horizontal_and_concat_str_combine_columns_per_row() -> Result<()> {
+    assert_eq!(
+        json_for(
+            PEOPLE,
+            &["horizontal", "sum", "age", "score", "--as", "total"]
+        )?[1]["total"],
+        json!(7.25)
+    );
+    assert_eq!(
+        json_for(PEOPLE, &["horizontal", "sum", "age", "score", "--nulls"])?[1]["sum"],
+        json!(null)
+    );
+    assert_eq!(
+        json_for(r#"[{"a":1,"b":5}]"#, &["horizontal", "max", "a", "b"])?,
+        json!([{"a": 1, "b": 5, "max": 5}])
+    );
+    assert_eq!(
+        json_for(
+            PEOPLE,
+            &["concat-str", "-", "name", "team", "--as", "label"]
+        )?[0]["label"],
+        json!("Ada-red")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_round_trips_parquet_arrow_and_avro_through_files_and_pipes() -> Result<()> {
+    let dir = TempDir::new()?;
+    let csv = write_fixture(
+        &dir,
+        "people.csv",
+        "name,age,score,joined\nAda,36,9.5,2021-03-05\nBob,,7.25,2022-11-30\n",
+    )?;
+    let expected = "name,age,score,joined\nAda,36,9.5,2021-03-05\nBob,,7.25,2022-11-30\n";
+    for (file, extra) in [
+        ("out.parquet", vec![]),
+        ("out.arrow", vec![]),
+        ("out.avro", vec![]),
+        ("snappy.avro", vec!["--avro-compression", "snappy"]),
+    ] {
+        let path = dir.path().join(file);
+        cmd()?
+            .arg("save")
+            .arg(&path)
+            .args(&extra)
+            .arg("--input")
+            .arg(&csv)
+            .assert()
+            .success()
+            .stdout(predicate::eq(""));
+        cmd()?
+            .arg(&path)
+            .arg("--to")
+            .arg("csv")
+            .assert()
+            .success()
+            .stdout(predicate::eq(expected));
+    }
+
+    let parquet = cmd()?
+        .arg(&csv)
+        .arg("--to")
+        .arg("parquet")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert!(parquet.starts_with(b"PAR1"));
+    cmd()?
+        .args(["filter", "age > 30", "--to", "csv"])
+        .write_stdin(parquet)
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "name,age,score,joined\nAda,36,9.5,2021-03-05\n",
+        ));
+    Ok(())
+}
+
+#[test]
+fn cli_arrow_pipelines_keep_types_and_empty_schemas() -> Result<()> {
+    let typed = cmd()?
+        .args([
+            "as-date",
+            "%Y-%m-%d",
+            "d",
+            "--data",
+            r#"[{"d":"2024-03-05","n":1}]"#,
+            "--to",
+            "arrow",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    cmd()?
+        .args(["schema", "--to", "csv"])
+        .write_stdin(typed.clone())
+        .assert()
+        .success()
+        .stdout(predicate::eq("column,dtype\nd,date\nn,i64\n"));
+    let empty = cmd()?
+        .args(["filter", "n > 5", "--to", "arrow"])
+        .write_stdin(typed)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    cmd()?
+        .args(["to", "csv"])
+        .write_stdin(empty)
+        .assert()
+        .success()
+        .stdout(predicate::eq("d,n\n"));
+    Ok(())
+}
+
+#[test]
+fn cli_open_applies_csv_read_options() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(&dir, "data.txt", "junk\n1;007;Ada\n2;010;Bob\n")?;
+    let assert = cmd()?
+        .arg("open")
+        .arg(&path)
+        .args([
+            "--type",
+            "csv",
+            "-d",
+            ";",
+            "--skip-rows",
+            "1",
+            "--no-input-header",
+            "--schema",
+            "column_2:str",
+            "--columns",
+            "column_2,column_3",
+            "--to",
+            "json",
+        ])
+        .assert()
+        .success();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&assert.get_output().stdout)?,
+        json!([
+            {"column_2": "007", "column_3": "Ada"},
+            {"column_2": "010", "column_3": "Bob"}
+        ])
+    );
+    let ragged = write_fixture(&dir, "ragged.csv", "a,b\n1,2\n3,4,5\n")?;
+    cmd()?
+        .arg("open")
+        .arg(&ragged)
+        .args(["--truncate-ragged-lines", "--to", "csv"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("a,b\n1,2\n3,4\n"));
+    cmd()?
+        .arg("open")
+        .arg(&ragged)
+        .args([
+            "--infer-schema",
+            "0",
+            "--truncate-ragged-lines",
+            "--to",
+            "json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq(
+            "[{\"a\":\"1\",\"b\":\"2\"},{\"a\":\"3\",\"b\":\"4\"}]\n",
+        ));
+    assert!(
+        error_for(r#"[{"a":1}]"#, &["open", "--delimiter", ";"])?
+            .contains("only apply to CSV/TSV input")
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_writes_csv_with_custom_delimiters() -> Result<()> {
+    cmd()?
+        .args([
+            "--data",
+            r#"[{"a":1,"b":"x"}]"#,
+            "--to",
+            "csv",
+            "--output-delimiter",
+            ";",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::eq("a;b\n1;x\n"));
+    let dir = TempDir::new()?;
+    let path = dir.path().join("out.csv");
+    cmd()?
+        .arg("save")
+        .arg(&path)
+        .args([
+            "--csv-delimiter",
+            "|",
+            "--csv-no-header",
+            "--data",
+            r#"[{"a":1,"b":"x"}]"#,
+        ])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read_to_string(path)?, "1|x\n");
+    Ok(())
+}
+
+#[test]
+fn cli_group_by_emits_groups_in_first_appearance_order() -> Result<()> {
+    let rows = (0..2000)
+        .map(|index| format!("{{\"k\":\"k{}\",\"v\":{index}}}", (index * 7919) % 53))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut outputs = Vec::new();
+    for _ in 0..3 {
+        let assert = cmd()?
+            .args(["group-by", "k", "--agg", "COUNT(*) AS n", "--to", "csv"])
+            .write_stdin(rows.clone())
+            .assert()
+            .success();
+        outputs.push(String::from_utf8(assert.get_output().stdout.clone())?);
+    }
+    assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    assert!(outputs[0].starts_with("k,n\nk0,"));
+    assert_eq!(
+        json_for(
+            r#"[{"k":"b","v":1},{"k":"a","v":2},{"k":"b","v":3}]"#,
+            &["group-by", "k", "--agg", "SUM(v) AS s"]
+        )?,
+        json!([{"k": "b", "s": 4}, {"k": "a", "s": 2}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_sort_by_is_stable_and_places_nulls_on_request() -> Result<()> {
+    let data = r#"[{"k":2,"id":"a"},{"k":null,"id":"b"},{"k":1,"id":"c"},{"k":2,"id":"d"},{"k":1,"id":"e"}]"#;
+    let ids = |value: Value| {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap().to_owned())
+            .collect::<String>()
+    };
+    assert_eq!(ids(json_for(data, &["sort-by", "k"])?), "ceadb");
+    assert_eq!(ids(json_for(data, &["sort-by", "k:desc"])?), "badce");
+    assert_eq!(
+        ids(json_for(data, &["sort-by", "k", "-r", "--nulls-last"])?),
+        "adceb"
+    );
+    assert_eq!(ids(json_for(data, &["sort-by", "k * -1"])?), "adceb");
+    Ok(())
+}
+
+#[test]
+fn cli_rename_accepts_nushell_style_old_new_pairs() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"a":1,"b":2}]"#, &["rename", "a", "x", "b", "y"])?,
+        json!([{"x": 1, "y": 2}])
+    );
+    assert!(error_for(r#"[{"a":1,"b":2}]"#, &["rename", "a=x", "b"])?.contains("not a mix"));
+    Ok(())
+}
+
+#[test]
+fn cli_unique_accepts_nushell_flags_and_selectors() -> Result<()> {
+    let data = r#"[{"k":1,"v":"a"},{"k":1,"v":"b"},{"k":2,"v":"c"}]"#;
+    assert_eq!(
+        json_for(data, &["drop-duplicates", "--subset", "k", "--last"])?,
+        json!([{"k": 1, "v": "b"}, {"k": 2, "v": "c"}])
+    );
+    assert_eq!(
+        json_for(data, &["unique", "type:integer"])?,
+        json!([{"k": 1, "v": "a"}, {"k": 2, "v": "c"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_with_row_index_adds_a_leading_index() -> Result<()> {
+    assert_eq!(
+        json_for(
+            r#"[{"a":"x"},{"a":"y"}]"#,
+            &["with-row-index", "--name", "i", "--offset", "1"]
+        )?,
+        json!([{"i": 1, "a": "x"}, {"i": 2, "a": "y"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_new_commands_propagate_empty_pipelines() -> Result<()> {
+    for args in [
+        vec!["uppercase"],
+        vec!["sum"],
+        vec!["value-counts"],
+        vec!["pivot", "--on", "a", "--index", "b"],
+        vec!["explode"],
+        vec!["cast", "i64"],
+        vec!["is-duplicated"],
+        vec!["get-year"],
+        vec!["fill-null", "0"],
+        vec!["join-where", r#"[{"a":1}]"#, "a > 0"],
+    ] {
+        cmd()?
+            .args(&args)
+            .write_stdin("")
+            .assert()
+            .success()
+            .stdout(predicate::eq(""));
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_renders_the_polars_repr() -> Result<()> {
+    cmd()?
+        .args(["--data", r#"[{"a":1}]"#, "to", "repr"])
+        .assert()
+        .success()
+        .stdout(predicate::str::starts_with("shape: (1, 1)\n"))
+        .stdout(predicate::str::contains("i64"));
+    Ok(())
+}
+
+#[test]
+fn cli_casts_text_to_temporal_types_and_selects_parameterized_dtypes() -> Result<()> {
+    let typed = cmd()?
+        .args([
+            "cast",
+            "datetime<ms, UTC>",
+            "at",
+            "--data",
+            r#"[{"at":"2024-01-01T05:00:00+02:00","n":1.5}]"#,
+            "--to",
+            "arrow",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    cmd()?
+        .args(["select", "type:datetime<ms, UTC>", "--to", "csv"])
+        .write_stdin(typed)
+        .assert()
+        .success()
+        .stdout(predicate::eq("at\n2024-01-01T03:00:00.000+0000\n"));
+    assert_eq!(
+        json_for(
+            r#"[{"d":"2024-01-01"},{"d":"bad"}]"#,
+            &["cast", "date", "d", "--non-strict"]
+        )?,
+        json!([{"d": "2024-01-01"}, {"d": null}])
+    );
+    assert!(error_for(r#"[{"d":"bad"}]"#, &["cast", "date", "d"])?.contains("cast failed"));
+    Ok(())
+}
+
+#[test]
+fn cli_column_commands_accept_all_null_json_columns() -> Result<()> {
+    let data = r#"[{"x":null,"n":1}]"#;
+    for args in [
+        vec!["is-in", "a,b", "x"],
+        vec!["replace", "a", "b", "x"],
+        vec!["get-year", "x"],
+        vec!["strftime", "%Y", "x"],
+        vec!["uppercase", "x"],
+        vec!["math", "abs", "x"],
+        vec!["cumulative", "sum", "x"],
+        vec!["rolling", "sum", "1", "x"],
+    ] {
+        assert_eq!(
+            json_for(data, &args)?,
+            json!([{"x": null, "n": 1}]),
+            "{args:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_join_matches_null_keys_and_coalesces_key_pairs_on_request() -> Result<()> {
+    let left = r#"[{"k":"0","v":"a"},{"k":null,"v":"b"}]"#;
+    let right = r#"[{"k":null,"w":"x"},{"k":"0","w":"y"}]"#;
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "k"])?,
+        json!([{"k": "0", "v": "a", "w": "y"}])
+    );
+    assert_eq!(
+        json_for(left, &["join", right, "--on", "k", "--nulls-equal"])?,
+        json!([
+            {"k": "0", "v": "a", "w": "y"},
+            {"k": null, "v": "b", "w": "x"}
+        ])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"k":1},{"k":2}]"#,
+            &[
+                "join",
+                r#"[{"id":2,"w":"x"},{"id":4,"w":"y"}]"#,
+                "--left-on",
+                "k",
+                "--right-on",
+                "id",
+                "--how",
+                "full",
+                "--coalesce-columns",
+            ]
+        )?,
+        json!([{"k": 1, "w": null}, {"k": 2, "w": "x"}, {"k": 4, "w": "y"}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_join_output_follows_left_rows_then_right_rows() -> Result<()> {
+    let right = r#"[{"id":3,"w":"x"},{"id":1,"w":"y"},{"id":1,"w":"z"}]"#;
+    assert_eq!(
+        json_for(
+            r#"[{"id":1},{"id":2}]"#,
+            &["join", right, "--on", "id", "--how", "full"]
+        )?,
+        json!([
+            {"id": 1, "w": "y"},
+            {"id": 1, "w": "z"},
+            {"id": 2, "w": null},
+            {"id": 3, "w": "x"}
+        ])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"id":1},{"id":2}]"#,
+            &["join", right, "--on", "id", "--how", "right"]
+        )?,
+        json!([
+            {"id": 3, "w": "x"},
+            {"id": 1, "w": "y"},
+            {"id": 1, "w": "z"}
+        ])
+    );
+    Ok(())
+}
