@@ -9,8 +9,59 @@ anyhow = "1.0.102"
 clap = { version = "4.5.41", features = ["derive"] }
 clap_complete = "4.6.9"
 htmd = "0.5.4"
-polars = { version = "0.53.0", features = ["csv", "json", "lazy", "sql"] }
+polars = { version = "0.53.0", features = [
+    "abs",
+    "arg_where",
+    "avro",
+    "bitwise",
+    "concat_str",
+    "cross_join",
+    "csv",
+    "cum_agg",
+    "cutqcut",
+    "diagonal_concat",
+    "dtype-array",
+    "dtype-categorical",
+    "dtype-date",
+    "dtype-datetime",
+    "dtype-decimal",
+    "dtype-duration",
+    "dtype-i16",
+    "dtype-i8",
+    "dtype-struct",
+    "dtype-time",
+    "dtype-u128",
+    "dtype-u16",
+    "dtype-u8",
+    "dynamic_group_by",
+    "iejoin",
+    "ipc",
+    "is_in",
+    "is_unique",
+    "json",
+    "lazy",
+    "log",
+    "parquet",
+    "pivot",
+    "random",
+    "range",
+    "regex",
+    "replace",
+    "rolling_window",
+    "round_series",
+    "semi_anti_join",
+    "sign",
+    "sql",
+    "string_to_integer",
+    "strings",
+    "temporal",
+    "timezones",
+    "to_dummies",
+    "trigonometry",
+    "unique_counts",
+] }
 pulldown-cmark = "0.13.3"
+regex = "1.12.3"
 roxmltree = "0.21.1"
 scraper = "0.26.0"
 serde_json = "1.0.149"

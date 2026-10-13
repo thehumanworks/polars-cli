@@ -1,20 +1,27 @@
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read},
+    panic::AssertUnwindSafe,
     path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::{Context, bail};
 use clap::ValueEnum;
 use polars::{
     frame::DataFrame,
-    io::SerReader,
-    prelude::{Column, CsvReadOptions, JsonReader},
+    io::{SerReader, avro::AvroReader},
+    prelude::{
+        Column, CsvReadOptions, DataType, IntoLazy, IpcReader, JsonReader, ParquetReader,
+        PlSmallStr, PolarsResult, Schema, col,
+    },
 };
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser, html};
 use roxmltree::{Document, Node};
 use scraper::{Html, Selector};
 use serde_json::{Map as JsonMap, Value as JsonValue};
+
+use crate::value::cast_expr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum InputFormat {
@@ -31,6 +38,46 @@ pub enum InputFormat {
     Markdown,
     Html,
     Xml,
+    Parquet,
+    #[value(alias = "ipc", alias = "feather")]
+    Arrow,
+    Avro,
+}
+
+impl InputFormat {
+    /// Formats parsed by the CSV reader, which accept the CSV-only read options.
+    pub fn is_delimited(self) -> bool {
+        matches!(self, Self::Csv | Self::Tsv)
+    }
+}
+
+/// Reader options mirroring `polars open` in Nushell.
+///
+/// Delimiter, header, schema-inference, skip, and ragged-line options only apply to CSV/TSV.
+/// Column projection and schema overrides apply to every tabular format.
+#[derive(Debug, Clone, Default)]
+pub struct ReadOptions {
+    pub delimiter: Option<u8>,
+    pub no_header: bool,
+    pub infer_schema_length: Option<usize>,
+    pub skip_rows: Option<usize>,
+    pub columns: Option<Vec<String>>,
+    pub schema: Option<Vec<(String, DataType)>>,
+    pub truncate_ragged_lines: bool,
+}
+
+impl ReadOptions {
+    fn has_delimited_only_options(&self) -> bool {
+        self.delimiter.is_some()
+            || self.no_header
+            || self.infer_schema_length.is_some()
+            || self.skip_rows.is_some()
+            || self.truncate_ragged_lines
+    }
+
+    pub fn is_default(&self) -> bool {
+        !self.has_delimited_only_options() && self.columns.is_none() && self.schema.is_none()
+    }
 }
 
 pub fn read_file(path: impl AsRef<Path>, format: Option<InputFormat>) -> anyhow::Result<DataFrame> {
@@ -69,6 +116,9 @@ pub fn detect_input_format(path: &Path) -> anyhow::Result<InputFormat> {
         Some("md" | "markdown") => Ok(InputFormat::Markdown),
         Some("html" | "htm") => Ok(InputFormat::Html),
         Some("xml") => Ok(InputFormat::Xml),
+        Some("parquet" | "pq") => Ok(InputFormat::Parquet),
+        Some("arrow" | "ipc" | "feather") => Ok(InputFormat::Arrow),
+        Some("avro") => Ok(InputFormat::Avro),
         _ => bail!(
             "unsupported input format for {}. Use --from or provide recognizable structured content",
             path.display()
@@ -77,6 +127,9 @@ pub fn detect_input_format(path: &Path) -> anyhow::Result<InputFormat> {
 }
 
 pub fn detect_input_format_from_bytes(input: &[u8]) -> anyhow::Result<InputFormat> {
+    if let Some(format) = detect_binary_format(input) {
+        return Ok(format);
+    }
     let text = input_as_utf8(input, "input")?;
     let text = text.trim_start_matches('\u{feff}').trim();
     if text.is_empty() {
@@ -124,6 +177,49 @@ pub fn detect_input_format_from_bytes(input: &[u8]) -> anyhow::Result<InputForma
     }
 
     Ok(InputFormat::Text)
+}
+
+/// Recognize binary container formats by their magic bytes.
+fn detect_binary_format(input: &[u8]) -> Option<InputFormat> {
+    // Require both the leading and trailing markers (or Avro's schema header) so text that
+    // merely starts with a magic string is still sniffed as text.
+    let head = &input[..input.len().min(4096)];
+    if input.len() >= 12 && input.starts_with(b"PAR1") && input.ends_with(b"PAR1") {
+        Some(InputFormat::Parquet)
+    } else if input.len() >= 14 && input.starts_with(b"ARROW1\0\0") && input.ends_with(b"ARROW1") {
+        Some(InputFormat::Arrow)
+    } else if input.starts_with(b"Obj\x01")
+        && head
+            .windows(b"avro.schema".len())
+            .any(|window| window == b"avro.schema")
+    {
+        Some(InputFormat::Avro)
+    } else {
+        None
+    }
+}
+
+static DECODING_BINARY: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a binary decoder is running; the CLI silences panic messages meanwhile, because
+/// [`decode_binary`] turns those panics into ordinary errors.
+pub fn is_decoding_binary() -> bool {
+    DECODING_BINARY.load(Ordering::SeqCst) > 0
+}
+
+/// Run a binary decoder, reporting malformed data as an error even when the decoder panics.
+fn decode_binary(
+    kind: &str,
+    label: &str,
+    decode: impl FnOnce() -> PolarsResult<DataFrame>,
+) -> anyhow::Result<DataFrame> {
+    DECODING_BINARY.fetch_add(1, Ordering::SeqCst);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(decode));
+    DECODING_BINARY.fetch_sub(1, Ordering::SeqCst);
+    match result {
+        Ok(result) => result.with_context(|| format!("failed to read {kind} input {label}")),
+        Err(_) => bail!("failed to read {kind} input {label}: the data is malformed"),
+    }
 }
 
 pub fn read_csv_file(path: impl AsRef<Path>) -> anyhow::Result<DataFrame> {
@@ -185,30 +281,124 @@ fn toml_value_to_json_rows(value: toml::Value) -> anyhow::Result<Vec<JsonValue>>
 }
 
 pub fn read_bytes(input: &[u8], format: InputFormat, label: &str) -> anyhow::Result<DataFrame> {
-    match format {
-        InputFormat::Csv => read_delimited_bytes(input, b','),
-        InputFormat::Tsv => read_delimited_bytes(input, b'\t'),
-        InputFormat::Json => read_json_bytes(input, label),
-        InputFormat::Jsonl => read_jsonl_bytes(input, label),
-        InputFormat::Yaml => read_yaml_bytes(input, label),
-        InputFormat::Text => read_text_bytes(input, label),
-        InputFormat::Toml => read_toml_bytes(input, label),
-        InputFormat::Table => read_table_bytes(input, label),
-        InputFormat::Markdown => read_markdown_bytes(input, label),
+    read_bytes_with_options(input, format, label, &ReadOptions::default())
+}
+
+pub fn read_bytes_with_options(
+    input: &[u8],
+    format: InputFormat,
+    label: &str,
+    options: &ReadOptions,
+) -> anyhow::Result<DataFrame> {
+    if options.has_delimited_only_options() && !format.is_delimited() {
+        bail!(
+            "--delimiter, --no-input-header, --infer-schema, --skip-rows, and --truncate-ragged-lines only apply to CSV/TSV input"
+        );
+    }
+    let projected = matches!(
+        format,
+        InputFormat::Csv
+            | InputFormat::Tsv
+            | InputFormat::Parquet
+            | InputFormat::Arrow
+            | InputFormat::Avro
+    );
+    let df = match format {
+        InputFormat::Csv => read_delimited_bytes(input, b',', options)?,
+        InputFormat::Tsv => read_delimited_bytes(input, b'\t', options)?,
+        InputFormat::Parquet => decode_binary("Parquet", label, || {
+            ParquetReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
+        InputFormat::Arrow => decode_binary("Arrow IPC", label, || {
+            IpcReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
+        InputFormat::Avro => decode_binary("Avro", label, || {
+            AvroReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
+        InputFormat::Json => read_json_bytes(input, label)?,
+        InputFormat::Jsonl => read_jsonl_bytes(input, label)?,
+        InputFormat::Yaml => read_yaml_bytes(input, label)?,
+        InputFormat::Text => read_text_bytes(input, label)?,
+        InputFormat::Toml => read_toml_bytes(input, label)?,
+        InputFormat::Table => read_table_bytes(input, label)?,
+        InputFormat::Markdown => read_markdown_bytes(input, label)?,
         InputFormat::Html => bail!(
             "HTML document input does not map directly to tabular data. Use --to markdown for document conversion, or use --from table to parse the first HTML <table>"
         ),
-        InputFormat::Xml => read_xml_bytes(input, label),
+        InputFormat::Xml => read_xml_bytes(input, label)?,
+    };
+    let df = match (&options.columns, projected) {
+        (Some(columns), false) => df
+            .select(columns.iter().map(String::as_str))
+            .context("--columns names a column that is not in the input")?,
+        _ => df,
+    };
+    match (&options.schema, format.is_delimited()) {
+        (Some(schema), false) => cast_to_schema(df, schema),
+        _ => Ok(df),
     }
 }
 
-fn read_delimited_bytes(input: &[u8], separator: u8) -> anyhow::Result<DataFrame> {
+fn cast_to_schema(df: DataFrame, schema: &[(String, DataType)]) -> anyhow::Result<DataFrame> {
+    if df.width() == 0 {
+        return Ok(df);
+    }
+    let casts = schema
+        .iter()
+        .map(|(name, dtype)| {
+            if df.get_column_index(name).is_none() {
+                bail!("--schema names column {name:?}, which is not in the input");
+            }
+            let from = df.schema().get(name.as_str()).cloned().unwrap_or_default();
+            Ok(cast_expr(col(name.as_str()), &from, dtype, true))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    df.lazy()
+        .with_columns(casts)
+        .collect()
+        .context("failed to apply --schema")
+}
+
+fn read_delimited_bytes(
+    input: &[u8],
+    separator: u8,
+    options: &ReadOptions,
+) -> anyhow::Result<DataFrame> {
+    let mut read_options = CsvReadOptions::default()
+        .with_has_header(!options.no_header)
+        .with_skip_rows(options.skip_rows.unwrap_or(0))
+        .map_parse_options(|parse| {
+            parse
+                .with_separator(options.delimiter.unwrap_or(separator))
+                .with_truncate_ragged_lines(options.truncate_ragged_lines)
+        });
+    if let Some(length) = options.infer_schema_length {
+        read_options = read_options.with_infer_schema_length(Some(length));
+    }
+    if let Some(columns) = &options.columns {
+        read_options = read_options.with_columns(Some(
+            columns
+                .iter()
+                .map(|name| PlSmallStr::from(name.as_str()))
+                .collect(),
+        ));
+    }
+    if let Some(schema) = &options.schema {
+        let overwrite = Schema::from_iter(
+            schema
+                .iter()
+                .map(|(name, dtype)| (PlSmallStr::from(name.as_str()), dtype.clone())),
+        );
+        read_options = read_options.with_schema_overwrite(Some(std::sync::Arc::new(overwrite)));
+    }
     polars::prelude::CsvReader::new(Cursor::new(input))
-        .with_options(
-            CsvReadOptions::default()
-                .with_has_header(true)
-                .map_parse_options(|options| options.with_separator(separator)),
-        )
+        .with_options(read_options)
         .finish()
         .map_err(Into::into)
 }

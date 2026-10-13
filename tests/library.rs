@@ -3,14 +3,16 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use polars::df;
 use polars_cli::read::{
-    InputFormat, detect_input_format, detect_input_format_from_bytes, read_bytes,
-    read_markdown_file, read_table_file, read_text_file, read_toml_file, read_xml_file,
+    InputFormat, ReadOptions, detect_input_format, detect_input_format_from_bytes, read_bytes,
+    read_bytes_with_options, read_markdown_file, read_table_file, read_text_file, read_toml_file,
+    read_xml_file,
 };
 use polars_cli::sql::SqlEngine;
 use polars_cli::transformer::{
-    JsonFormat, html_document_to_markdown, to_csv, to_html, to_json, to_markdown, to_table,
-    to_text_lines, to_toml, to_tsv, to_xml, to_yaml,
+    JsonFormat, html_document_to_markdown, to_arrow, to_avro, to_csv, to_delimited, to_html,
+    to_json, to_markdown, to_parquet, to_table, to_text_lines, to_toml, to_tsv, to_xml, to_yaml,
 };
+use polars_cli::value::parse_dtype;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -606,5 +608,91 @@ fn sniffs_quoted_and_multiline_csv_content() -> Result<()> {
 
     let multiline = b"name,note\nAda,\"hello\nworld\"\n";
     assert_eq!(detect_input_format_from_bytes(multiline)?, InputFormat::Csv);
+    Ok(())
+}
+
+#[test]
+fn detects_binary_formats_from_extensions_and_magic_bytes() -> Result<()> {
+    assert_eq!(
+        detect_input_format(Path::new("data.parquet"))?,
+        InputFormat::Parquet
+    );
+    assert_eq!(
+        detect_input_format(Path::new("data.feather"))?,
+        InputFormat::Arrow
+    );
+    assert_eq!(
+        detect_input_format(Path::new("data.avro"))?,
+        InputFormat::Avro
+    );
+
+    let mut df = df!("name" => ["Ada", "Lin"], "age" => [36i64, 28])?;
+    assert_eq!(
+        detect_input_format_from_bytes(&to_parquet(&mut df)?)?,
+        InputFormat::Parquet
+    );
+    assert_eq!(
+        detect_input_format_from_bytes(&to_arrow(&mut df)?)?,
+        InputFormat::Arrow
+    );
+    assert_eq!(
+        detect_input_format_from_bytes(&to_avro(&mut df, None)?)?,
+        InputFormat::Avro
+    );
+    Ok(())
+}
+
+#[test]
+fn binary_writers_round_trip_through_the_readers() -> Result<()> {
+    let mut df = df!("name" => ["Ada", "Lin"], "score" => [Some(9.5), None])?;
+    for (bytes, format) in [
+        (to_parquet(&mut df)?, InputFormat::Parquet),
+        (to_arrow(&mut df)?, InputFormat::Arrow),
+        (to_avro(&mut df, None)?, InputFormat::Avro),
+    ] {
+        let mut read = read_bytes(&bytes, format, "test")?;
+        assert_eq!(
+            as_json(&mut read)?,
+            json!([{"name": "Ada", "score": 9.5}, {"name": "Lin", "score": null}])
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn read_options_configure_csv_parsing_and_projection() -> Result<()> {
+    let options = ReadOptions {
+        delimiter: Some(b';'),
+        no_header: true,
+        skip_rows: Some(1),
+        columns: Some(vec!["column_1".to_owned()]),
+        schema: Some(vec![("column_1".to_owned(), parse_dtype("str")?)]),
+        ..ReadOptions::default()
+    };
+    let mut df =
+        read_bytes_with_options(b"skip me\n007;Ada\n", InputFormat::Csv, "test", &options)?;
+    assert_eq!(as_json(&mut df)?, json!([{"column_1": "007"}]));
+
+    let projected = ReadOptions {
+        columns: Some(vec!["b".to_owned()]),
+        schema: Some(vec![("b".to_owned(), parse_dtype("f64")?)]),
+        ..ReadOptions::default()
+    };
+    let mut df =
+        read_bytes_with_options(br#"[{"a":1,"b":2}]"#, InputFormat::Json, "test", &projected)?;
+    assert_eq!(as_json(&mut df)?, json!([{"b": 2.0}]));
+
+    let csv_only = ReadOptions {
+        delimiter: Some(b';'),
+        ..ReadOptions::default()
+    };
+    assert!(read_bytes_with_options(b"[]", InputFormat::Json, "test", &csv_only).is_err());
+    Ok(())
+}
+
+#[test]
+fn delimited_output_accepts_any_single_byte_separator() -> Result<()> {
+    let mut df = df!("a" => [1i64], "b" => ["x"])?;
+    assert_eq!(to_delimited(&mut df, b'|', true)?, "a|b\n1|x\n");
     Ok(())
 }
