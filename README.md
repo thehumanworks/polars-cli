@@ -12,10 +12,11 @@ pl open people.csv \
   | pl to csv
 ```
 
-The command vocabulary follows the useful core of Nushell's Polars plugin, but
-the interface is designed for Bash and other Unix shells: stdin/stdout composition,
-direct and inline inputs, raw scalar output, deterministic non-interactive
-formats, useful exit statuses, and generated shell completions.
+The command vocabulary covers Nushell's Polars plugin, but the interface is
+designed for Bash and other Unix shells: stdin/stdout composition, direct and
+inline inputs, raw scalar output, deterministic non-interactive formats, useful
+exit statuses, and generated shell completions. [docs/nushell-parity.md](docs/nushell-parity.md)
+maps every Nushell `polars` command to its `pl` form.
 
 ## Install
 
@@ -63,6 +64,21 @@ pl open @records.data --from csv
 `--data` is the unambiguous choice for literals that resemble paths or begin
 with option syntax. `--from FORMAT` overrides extension and content detection.
 
+`open` (alias `into-df`) also takes the reader options of Nushell's `polars open`:
+
+```bash
+pl open export.txt --type csv --delimiter ';' --skip-rows 2 --no-input-header
+pl open big.csv --columns id,total --schema 'id:str,total:f64'
+pl open zips.csv --infer-schema 0          # every column as text
+pl open ragged.csv --truncate-ragged-lines
+pl open columns.json --as-columns          # {"a":[1,2],"b":[3,4]} as two rows
+```
+
+`--delimiter`, `--no-input-header`, `--infer-schema`, `--skip-rows`, and
+`--truncate-ragged-lines` apply to CSV/TSV only and are rejected for other
+formats. `--columns` and `--schema` apply to every tabular format; `--schema`
+also accepts a JSON object such as `'{"id":"str"}'`.
+
 ### Input formats
 
 | Format | Names | Notes |
@@ -78,10 +94,14 @@ with option syntax. `--from FORMAT` overrides extension and content detection.
 | HTML document | `html` | Document conversion is intentionally limited to Markdown output. |
 | XML | `xml` | Repeated child elements become rows; nested fields are flattened. |
 | text | `text` | Each line becomes a row in a `line` column. |
+| Parquet | `parquet` | Binary; `.parquet` or `.pq`. |
+| Arrow IPC | `arrow`, `ipc`, `feather` | Binary; `.arrow`, `.ipc`, or `.feather`. |
+| Avro | `avro` | Binary; `.avro`. |
 
 Known file extensions are authoritative. Stdin, inline values, and files with
-unknown extensions are content-sniffed. Use `--from` whenever the content is
-ambiguous, such as a one-column CSV.
+unknown extensions are content-sniffed; Parquet, Arrow, and Avro are recognized
+by their magic bytes. Use `--from` whenever the content is ambiguous, such as a
+one-column CSV.
 
 ## Output and stream contract
 
@@ -101,7 +121,18 @@ Output selection follows this precedence:
 5. JSONL when stdout is redirected or piped.
 
 Supported outputs are `csv`, `tsv`, `json`, `jsonl`/`ndjson`, `yaml`/`yml`,
-`toml`, `markdown`, `table`, `text`, `html`, and `xml`.
+`toml`, `markdown`, `table`, `text`, `html`, `xml`, `parquet`, `arrow`
+(`ipc`, `feather`), `avro`, and `repr` (Polars' own display format).
+
+Binary formats are written verbatim to files and pipes, but `pl` refuses to
+write them to a terminal. `save` writes a file and prints nothing:
+
+```bash
+pl open people.csv | pl save people.parquet
+pl open people.csv | pl save people.avro --avro-compression snappy
+pl open people.csv | pl save people.txt --type csv --csv-delimiter '|' --csv-no-header
+pl open people.csv | pl to csv --output-delimiter ';'
+```
 
 Non-empty rendered output is a POSIX text stream: it ends in exactly one newline.
 Formats that already terminate the last record (JSONL, CSV/TSV, `--raw`) are not
@@ -119,21 +150,95 @@ schema by definition; downstream `pl` transforms therefore propagate it as an
 empty dataframe. Row counts remain correct, while a CSV header cannot be
 reconstructed after that empty wire boundary.
 
+### Typed pipelines
+
+JSON carries dates, datetimes, and decimals as text. Date and time commands
+accept ISO-8601 text, so most pipelines need nothing extra. When exact types
+matter between stages, use Arrow (or Parquet) as the wire format; input format
+detection recognizes it automatically, and even zero-row results keep their
+schema:
+
+```bash
+pl open events.csv \
+  | pl as-datetime '%d/%m/%Y %H:%M' at --time-zone UTC --to arrow \
+  | pl convert-time-zone Europe/Paris at --to arrow \
+  | pl filter "at >= '2024-01-01'" \
+  | pl to csv
+```
+
 ## Commands
 
 | Area | Commands |
 | --- | --- |
-| Read | `open` |
-| Rows | `filter`/`where`, `first`/`head`, `last`/`tail`, `slice`, `sort-by`/`sort`, `unique`/`distinct`, `drop-nulls`, `reverse` |
-| Columns | `select`/`get`, `with-column`/`mutate`, `drop`, `rename` |
-| Aggregate | `group-by` |
-| Combine | `join`, `concat` |
+| Read/write | `open`/`into-df`, `save`, `to` |
+| Rows | `filter`/`where`/`filter-with`, `first`/`head`, `last`/`tail`, `slice`, `take`, `sample`, `sort-by`/`sort`, `unique`/`distinct`/`drop-duplicates`, `drop-nulls`, `reverse`, `shift`, `with-row-index` |
+| Columns | `select`/`get`, `with-column`/`mutate`, `drop`, `rename`, `cast`, `fill-null`, `fill-nan`, `set`, `set-with-idx`, `replace`, `cut`, `qcut`, `integer`, `decimal` |
+| Aggregate | `group-by`, `sum`, `min`, `max`, `mean`, `median`, `std`, `var`, `quantile`, `entropy`, `count`, `len`, `count-null`, `n-unique`, `implode`, `all-true`, `all-false`, `value-counts`, `summary` |
+| Combine | `join`, `join-where`, `concat`, `append` |
+| Reshape | `pivot`, `unpivot`/`melt`, `explode`/`flatten`, `unnest`, `dummies` |
+| Masks and indices | `is-null`, `is-not-null`, `is-duplicated`, `is-unique`, `is-in`, `not`, `arg-max`, `arg-min`, `arg-true`, `arg-unique`, `arg-sort`, `arg-where` |
+| Strings | `uppercase`, `lowercase`, `contains`, `str-lengths`, `str-replace`, `str-replace-all`, `str-slice`, `str-split`, `str-strip-chars`, `str-join`, `concat-str` |
+| Dates and times | `get-year`, `get-month`, `get-week`, `get-weekday`, `get-day`, `get-ordinal`, `get-hour`, `get-minute`, `get-second`, `get-nanosecond`, `datepart`, `strftime`, `as-date`, `as-datetime`, `convert-time-zone`, `replace-time-zone`, `truncate`, `date-range`, `datetime-range`, `date-ranges`, `datetime-ranges` |
+| Numbers | `math abs\|cos\|sin\|exp\|log\|log1p\|sign\|sqrt\|dot\|bitwise-*`, `cumulative`, `rolling`, `horizontal` |
+| Nested | `list-contains`, `struct-json-encode` |
 | SQL | `query`/`sql` |
-| Inspect | `columns`, `schema`, `shape`, `count` |
-| Render | `to` |
+| Inspect | `columns`, `schema`, `shape` |
 | Shell | `completions` |
 
 Run `pl COMMAND --help` for arguments and aliases.
+
+### Column selectors
+
+`select`, `drop`, `unique`, `drop-nulls`, and every `COLUMN...` argument of the
+column, aggregation, mask, and reshape commands accept selectors. Join keys,
+`group-by` and `sort-by` keys, and options that name a single column stay plain
+names or SQL expressions. An exact column name always wins, so headers that look
+like selectors stay addressable.
+
+| Selector | Selects |
+| --- | --- |
+| `name` | that column (missing names are an error) |
+| `*` | every column |
+| `'^regex$'` | columns whose names match, as in Polars |
+| `type:GROUP[,GROUP...]` | `numeric`, `integer`, `signed-integer`, `unsigned-integer`, `float`, `decimal`, `string`, `boolean`, `temporal`, `date`, `datetime`, `duration`, `time`, `list`, `array`, `struct`, `nested`, `categorical`, `enum`, `binary`, `null`, or an exact dtype such as `type:i64` or `type:datetime<ms, UTC>` |
+| `index:N[,N...]` | columns by position; negative positions count from the end |
+
+```bash
+pl orders.csv select type:numeric
+pl orders.csv drop '^tmp_.*$'
+pl orders.csv cast f64 type:integer
+pl orders.csv select index:0,-1
+```
+
+### Column commands
+
+Column ("series") commands such as `uppercase`, `cast`, `fill-null`,
+`cumulative`, `get-year`, or `math sqrt` take optional `COLUMN...` selectors.
+Without them every column is used, so a one-column input behaves exactly like a
+Nushell series. Results replace their source columns in place, keeping the
+frame's shape and column order. `--as NAME` adds the result as a new column
+instead; with several columns, `{}` in NAME expands to each source name.
+
+```bash
+pl people.csv uppercase name
+pl people.csv str-lengths name --as name_length
+pl people.csv uppercase type:string --as '{}_upper'
+pl events.csv get-year created_at --as year
+pl prices.csv rolling mean 7 close --as close_7d
+pl readings.csv fill-null --strategy forward
+```
+
+Values on the command line are parsed as JSON scalars when they are valid JSON
+(`0`, `1.5`, `true`, `null`, `'"42"'`) and are plain strings otherwise. Value
+lists are comma-separated or a JSON array: `pl is-in 'a,b'`, `pl cut '[0, 10, 100]'`.
+
+### Deterministic output
+
+Bash scripts compare, diff, and cache output, so `pl` never depends on hash
+order: `group-by`, `value-counts`, `pivot`, and `unique` keep first-appearance
+order, `sort-by` and `arg-sort` are stable, and `join` and `join-where` order
+matches by left row, then right row (right joins by right row; unmatched right
+rows of a full join come last). `sample` is reproducible with `--seed`.
 
 ## SQL expressions
 
@@ -153,6 +258,16 @@ Use SQL identifier quotes for names containing spaces or punctuation:
 
 ```bash
 pl people.csv select '"full name" AS name'
+```
+
+SQL covers Nushell's expression builders (`polars col`, `lit`, `as`, `when`,
+`otherwise`, `expr-not`, `is-in`, `concat-str`, `over`):
+
+```bash
+pl orders.csv with-column "size=CASE WHEN quantity > 10 THEN 'bulk' ELSE 'unit' END"
+pl orders.csv with-column 'customer_total=SUM(price * quantity) OVER (PARTITION BY customer)'
+pl orders.csv filter "NOT (status IN ('void', 'test'))"
+pl orders.csv select "'2024' AS batch" id
 ```
 
 `query` registers the current input frame as `df`:
@@ -191,8 +306,38 @@ pl concat january.csv february.csv march.csv --to csv
 cat january.csv | pl concat february.csv | pl to csv
 ```
 
-Join kinds are `inner`, `left`, `full`, and `cross`. Full joins coalesce
-same-name key columns.
+Join kinds are `inner`, `left`, `right`, `full`, `cross`, `semi`, and `anti`.
+Full and right joins coalesce same-name key columns, and `--coalesce-columns`
+does the same for differently named key pairs. `--suffix` (default `_right`)
+renames clashing right-hand columns, and `--nulls-equal` lets null keys match.
+
+```bash
+# Inequality and range joins with a SQL predicate.
+pl people.json join-where offers.json 'cash >= price'
+
+# Rows that do or do not have a match.
+pl customers.csv join orders.csv --on customer_id --how semi
+pl customers.csv join orders.csv --on customer_id --how anti
+
+# Align differently shaped inputs by column name.
+pl concat --diagonal january.json february.json
+
+# Side by side (Nushell `polars append`), or stacked with --col.
+pl left.csv append right.csv
+```
+
+## Reshape and summarize
+
+```bash
+pl sales.csv pivot --on month --index region --values revenue --aggregate sum
+pl wide.csv unpivot --index id --variable-name metric --value-name value
+pl orders.json explode items | pl unnest items --separator .
+pl people.csv value-counts team --sort
+pl people.csv summary --quantiles 0.1,0.5,0.9
+pl people.csv group-by team --agg 'AVG(age) AS mean_age' --agg 'COUNT(*) AS n'
+pl prices.csv rolling --index-column day --period 7d --agg 'AVG(close) AS weekly'
+pl date-range --start 2024-01-01 --end 2024-01-31 --interval 1w
+```
 
 ## Replacing common jq/yq pipelines
 
