@@ -31,6 +31,55 @@ cargo build --release
 ./target/release/pl --help
 ```
 
+### Install with Nix
+
+The flake supports `x86_64-linux`, `aarch64-linux`, `x86_64-darwin`, and
+`aarch64-darwin`. Intel macOS uses the Nixpkgs 26.05 Darwin branch, because
+unstable dropped `x86_64-darwin`. `packages.default` installs both binaries.
+`apps.default` runs `pl`.
+
+```bash
+nix run github:thehumanworks/polars-cli -- --help
+nix profile install github:thehumanworks/polars-cli
+```
+
+As a flake input, apply the overlay so `pkgs.polars-cli` is available:
+
+```nix
+{
+  inputs.pl.url = "github:thehumanworks/polars-cli";
+
+  outputs = { nixpkgs, pl, ... }: let
+    system = "x86_64-linux";
+    pkgs = import nixpkgs {
+      inherit system;
+      overlays = [ pl.overlays.default ];
+    };
+  in {
+    # pkgs.polars-cli
+  };
+}
+```
+
+Home Manager and NixOS modules install the same package when `programs.pl.enable`
+is set:
+
+```nix
+# Home Manager
+{ inputs, ... }: {
+  imports = [ inputs.pl.homeManagerModules.default ];
+  programs.pl.enable = true;
+}
+
+# NixOS
+{ inputs, ... }: {
+  imports = [ inputs.pl.nixosModules.default ];
+  programs.pl.enable = true;
+}
+```
+
+`nix develop` opens a shell with the Rust toolchain used to build and test.
+
 ## Supply input
 
 Every dataframe command accepts the same input forms. Global options may appear
