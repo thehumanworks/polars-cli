@@ -97,15 +97,14 @@ pub fn select(df: DataFrame, expressions: &[String]) -> anyhow::Result<DataFrame
         return Ok(df);
     }
     let mut projection = Vec::with_capacity(expressions.len());
+    let mut copies = Vec::new();
     for expression in expressions {
         if df.get_column_index(expression).is_some() {
-            projection.push(quote_identifier(expression));
+            projection.push(project_column(expression, &mut copies));
         } else if expression != "*" && selector::is_selector_syntax(expression) {
-            projection.extend(
-                selector::resolve(df.schema(), std::slice::from_ref(expression))?
-                    .iter()
-                    .map(|name| quote_identifier(name)),
-            );
+            for name in selector::resolve(df.schema(), std::slice::from_ref(expression))? {
+                projection.push(project_column(&name, &mut copies));
+            }
         } else {
             projection.push(sql_expression(expression));
         }
@@ -113,7 +112,32 @@ pub fn select(df: DataFrame, expressions: &[String]) -> anyhow::Result<DataFrame
     if projection.is_empty() {
         return Ok(DataFrame::empty());
     }
+    let mut df = df;
+    for (hidden, name) in copies {
+        let mut column = df.column(&name)?.clone();
+        column.rename(hidden.into());
+        df.with_column(column)?;
+    }
     query(df, &format!("SELECT {} FROM df", projection.join(", ")))
+}
+
+/// A SQL projection item selecting the column `name` exactly.
+///
+/// Polars SQL reads a quoted `*` or `^…$` identifier as a pattern, so such columns are
+/// projected from a hidden copy (recorded in `copies`) and renamed back.
+fn project_column(name: &str, copies: &mut Vec<(String, String)>) -> String {
+    if name == "*" || (name.starts_with('^') && name.ends_with('$')) {
+        let hidden = format!("__pl_select_{}", copies.len());
+        let item = format!(
+            "{} AS {}",
+            quote_identifier(&hidden),
+            quote_identifier(name)
+        );
+        copies.push((hidden, name.to_owned()));
+        item
+    } else {
+        quote_identifier(name)
+    }
 }
 
 pub fn filter(df: DataFrame, predicate: &str) -> anyhow::Result<DataFrame> {
@@ -180,7 +204,23 @@ pub fn sort_by(
     for (index, expression) in expressions.iter().enumerate() {
         let (expression, direction) = parse_sort_expression(expression, descending);
         let expression = expression.trim();
-        if df.get_column_index(expression).is_some() {
+        if let Ok(position) = expression.parse::<usize>() {
+            // A bare integer is a 1-based column position, as in SQL `ORDER BY 2`.
+            let name = position
+                .checked_sub(1)
+                .and_then(|index| {
+                    df.get_column_names()
+                        .get(index)
+                        .map(|name| name.to_string())
+                })
+                .with_context(|| {
+                    format!(
+                        "sort-by position {position} is out of range for {} column(s)",
+                        df.width()
+                    )
+                })?;
+            keys.push(name);
+        } else if df.get_column_index(expression).is_some() {
             keys.push(expression.to_owned());
         } else if is_simple_identifier(expression) {
             bail!("column {expression:?} does not exist");
@@ -291,8 +331,11 @@ pub fn unique(df: DataFrame, columns: &[String], keep: KeepStrategy) -> anyhow::
     if is_schema_less_empty(&df) {
         return Ok(df);
     }
-    let columns = selector::resolve(df.schema(), columns)?;
-    let subset = (!columns.is_empty()).then_some(columns.as_slice());
+    let selected = selector::resolve(df.schema(), columns)?;
+    if !columns.is_empty() && selected.is_empty() {
+        bail!("unique: the column selection matched no columns");
+    }
+    let subset = (!selected.is_empty()).then_some(selected.as_slice());
     df.unique_stable(subset, keep.into(), None)
         .context("failed to remove duplicate rows")
 }
@@ -301,8 +344,12 @@ pub fn drop_nulls(df: DataFrame, columns: &[String]) -> anyhow::Result<DataFrame
     if is_schema_less_empty(&df) {
         return Ok(df);
     }
-    let columns = selector::resolve(df.schema(), columns)?;
-    let subset = (!columns.is_empty()).then_some(columns.as_slice());
+    let selected = selector::resolve(df.schema(), columns)?;
+    if !columns.is_empty() && selected.is_empty() {
+        // No selected column can hold a null, so no row is dropped.
+        return Ok(df);
+    }
+    let subset = (!selected.is_empty()).then_some(selected.as_slice());
     df.drop_nulls(subset)
         .context("failed to drop rows containing null values")
 }
@@ -342,15 +389,31 @@ pub fn group_by(
         quote_identifier(first)
     ));
     let grouped = query(
-        df,
+        df.clone(),
         &format!(
             "SELECT {} FROM df GROUP BY {} ORDER BY {}",
             projection.join(", "),
             key_expressions.join(", "),
             quote_identifier(first)
         ),
-    )?;
-    Ok(grouped.drop_many([first]))
+    );
+    match grouped {
+        Ok(grouped) => Ok(grouped.drop_many([first])),
+        // Report errors in terms of the user's query, not the ordering helper columns.
+        Err(error) => {
+            let mut user_projection = key_expressions.clone();
+            user_projection.extend(aggregations.iter().cloned());
+            query(
+                df.drop(row)?,
+                &format!(
+                    "SELECT {} FROM df GROUP BY {}",
+                    user_projection.join(", "),
+                    key_expressions.join(", ")
+                ),
+            )?;
+            Err(error)
+        }
+    }
 }
 
 /// Options that refine how `join` matches keys and names its output.

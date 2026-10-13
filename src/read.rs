@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
     io::{Cursor, Read},
+    panic::AssertUnwindSafe,
     path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
 };
 
 use anyhow::{Context, bail};
@@ -11,7 +13,7 @@ use polars::{
     io::{SerReader, avro::AvroReader},
     prelude::{
         Column, CsvReadOptions, DataType, IntoLazy, IpcReader, JsonReader, ParquetReader,
-        PlSmallStr, Schema, col,
+        PlSmallStr, PolarsResult, Schema, col,
     },
 };
 use pulldown_cmark::{Options as MarkdownOptions, Parser as MarkdownParser, html};
@@ -179,14 +181,44 @@ pub fn detect_input_format_from_bytes(input: &[u8]) -> anyhow::Result<InputForma
 
 /// Recognize binary container formats by their magic bytes.
 fn detect_binary_format(input: &[u8]) -> Option<InputFormat> {
-    if input.starts_with(b"PAR1") {
+    // Require both the leading and trailing markers (or Avro's schema header) so text that
+    // merely starts with a magic string is still sniffed as text.
+    let head = &input[..input.len().min(4096)];
+    if input.len() >= 12 && input.starts_with(b"PAR1") && input.ends_with(b"PAR1") {
         Some(InputFormat::Parquet)
-    } else if input.starts_with(b"ARROW1") {
+    } else if input.len() >= 14 && input.starts_with(b"ARROW1\0\0") && input.ends_with(b"ARROW1") {
         Some(InputFormat::Arrow)
-    } else if input.starts_with(b"Obj\x01") {
+    } else if input.starts_with(b"Obj\x01")
+        && head
+            .windows(b"avro.schema".len())
+            .any(|window| window == b"avro.schema")
+    {
         Some(InputFormat::Avro)
     } else {
         None
+    }
+}
+
+static DECODING_BINARY: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether a binary decoder is running; the CLI silences panic messages meanwhile, because
+/// [`decode_binary`] turns those panics into ordinary errors.
+pub fn is_decoding_binary() -> bool {
+    DECODING_BINARY.load(Ordering::SeqCst) > 0
+}
+
+/// Run a binary decoder, reporting malformed data as an error even when the decoder panics.
+fn decode_binary(
+    kind: &str,
+    label: &str,
+    decode: impl FnOnce() -> PolarsResult<DataFrame>,
+) -> anyhow::Result<DataFrame> {
+    DECODING_BINARY.fetch_add(1, Ordering::SeqCst);
+    let result = std::panic::catch_unwind(AssertUnwindSafe(decode));
+    DECODING_BINARY.fetch_sub(1, Ordering::SeqCst);
+    match result {
+        Ok(result) => result.with_context(|| format!("failed to read {kind} input {label}")),
+        Err(_) => bail!("failed to read {kind} input {label}: the data is malformed"),
     }
 }
 
@@ -274,18 +306,21 @@ pub fn read_bytes_with_options(
     let df = match format {
         InputFormat::Csv => read_delimited_bytes(input, b',', options)?,
         InputFormat::Tsv => read_delimited_bytes(input, b'\t', options)?,
-        InputFormat::Parquet => ParquetReader::new(Cursor::new(input))
-            .with_columns(options.columns.clone())
-            .finish()
-            .with_context(|| format!("failed to read Parquet input {label}"))?,
-        InputFormat::Arrow => IpcReader::new(Cursor::new(input))
-            .with_columns(options.columns.clone())
-            .finish()
-            .with_context(|| format!("failed to read Arrow IPC input {label}"))?,
-        InputFormat::Avro => AvroReader::new(Cursor::new(input))
-            .with_columns(options.columns.clone())
-            .finish()
-            .with_context(|| format!("failed to read Avro input {label}"))?,
+        InputFormat::Parquet => decode_binary("Parquet", label, || {
+            ParquetReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
+        InputFormat::Arrow => decode_binary("Arrow IPC", label, || {
+            IpcReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
+        InputFormat::Avro => decode_binary("Avro", label, || {
+            AvroReader::new(Cursor::new(input))
+                .with_columns(options.columns.clone())
+                .finish()
+        })?,
         InputFormat::Json => read_json_bytes(input, label)?,
         InputFormat::Jsonl => read_jsonl_bytes(input, label)?,
         InputFormat::Yaml => read_yaml_bytes(input, label)?,

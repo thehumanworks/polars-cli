@@ -5,7 +5,7 @@ use polars::prelude::{DataFrame, Expr, IntoLazy, Null, lit};
 
 use super::{
     col,
-    column::{Target, resolve_required, transform},
+    column::{MAX_OFFSET, Target, resolve_required, transform},
     is_schema_less_empty,
 };
 
@@ -66,6 +66,7 @@ pub fn slice(
     length: Option<u64>,
 ) -> anyhow::Result<DataFrame> {
     let length = length.map_or_else(|| lit(Null {}), lit);
+    let start = start.clamp(-MAX_OFFSET, MAX_OFFSET);
     transform(df, target, "str-slice", |source| {
         Ok(source
             .string("str-slice")?

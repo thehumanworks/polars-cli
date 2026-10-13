@@ -22,6 +22,10 @@ use crate::{
     value::{cast_expr, list_series, scalar_expr},
 };
 
+/// Largest offset magnitude passed to Polars. Frames and strings are far shorter, so clamping
+/// to it never changes a result, while i64::MIN would overflow when Polars negates it.
+pub(crate) const MAX_OFFSET: i64 = 1 << 48;
+
 /// Which columns a transform reads and where it writes.
 #[derive(Debug, Clone, Default)]
 pub struct Target {
@@ -392,6 +396,9 @@ pub fn shift(
     fill: Option<&JsonValue>,
 ) -> anyhow::Result<DataFrame> {
     let fill = fill.map(scalar_expr).transpose()?;
+    // Any shift at least as long as the frame empties it; clamping keeps Polars from
+    // overflowing when it negates i64::MIN.
+    let periods = periods.clamp(-MAX_OFFSET, MAX_OFFSET);
     transform(df, target, "shift", |source| {
         Ok(match &fill {
             Some(fill) => source.expr().shift_and_fill(lit(periods), fill.clone()),
@@ -524,6 +531,9 @@ pub fn cut(
     })
 }
 
+/// Upper bound on uniform `qcut` bins; Polars materializes one probability per bin.
+const MAX_QCUT_BINS: usize = 10_000;
+
 #[derive(Debug, Clone)]
 pub enum Quantiles {
     Bins(usize),
@@ -539,6 +549,9 @@ pub fn qcut(
 ) -> anyhow::Result<DataFrame> {
     let bins = match quantiles {
         Quantiles::Bins(0) => bail!("qcut requires at least one bin"),
+        Quantiles::Bins(bins) if *bins > MAX_QCUT_BINS => {
+            bail!("qcut supports at most {MAX_QCUT_BINS} bins")
+        }
         Quantiles::Bins(bins) => *bins,
         Quantiles::Probabilities(probabilities) => {
             if probabilities

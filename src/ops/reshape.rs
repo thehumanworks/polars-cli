@@ -104,7 +104,7 @@ pub fn sample(
     let rows = match size {
         SampleSize::Rows(rows) => rows,
         SampleSize::Fraction(fraction) => {
-            if fraction < 0.0 || (!replace && fraction > 1.0) {
+            if !fraction.is_finite() || fraction < 0.0 || (!replace && fraction > 1.0) {
                 bail!("sample --fraction must be between 0 and 1 unless --replace is set");
             }
             (df.height() as f64 * fraction) as usize
@@ -478,5 +478,5 @@ pub fn rolling_by(df: DataFrame, options: &RollingBy) -> anyhow::Result<DataFram
         )
         .agg(aggregations)
         .collect()
-        .context("rolling failed; the index column must be sorted (use sort-by first)")
+        .context("rolling failed (the index column must be sorted ascending; use sort-by first)")
 }

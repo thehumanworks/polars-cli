@@ -341,8 +341,9 @@ pub fn arg_sort(
                 .with_maintain_order(true),
         )
         .select([col(index).alias("arg_sort")]);
-    if let Some(limit) = limit {
-        sorted = sorted.limit(limit as u32);
+    // A limit beyond the index range cannot cut anything off.
+    if let Some(limit) = limit.and_then(|limit| u32::try_from(limit).ok()) {
+        sorted = sorted.limit(limit);
     }
     sorted.collect().context("arg-sort failed")
 }

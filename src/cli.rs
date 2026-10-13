@@ -29,6 +29,7 @@ use crate::{
         InputFormat, ReadOptions, detect_input_format, detect_input_format_from_bytes,
         read_bytes_with_options,
     },
+    selector,
     sql::SqlEngine,
     transformer::{
         JsonFormat, html_document_to_markdown, to_arrow, to_avro, to_delimited, to_html, to_json,
@@ -556,7 +557,7 @@ enum Commands {
         columns: Vec<String>,
 
         /// Columns to consider; same as positional columns.
-        #[arg(short = 's', long, value_delimiter = ',')]
+        #[arg(short = 's', long)]
         subset: Vec<String>,
 
         #[arg(long, value_enum, default_value_t = KeepArg::First)]
@@ -798,15 +799,15 @@ enum Commands {
     /// Pivot from long to wide format.
     Pivot {
         /// Columns whose values become new column names.
-        #[arg(long, required = true, value_delimiter = ',')]
+        #[arg(long, required = true)]
         on: Vec<String>,
 
         /// Columns that identify output rows.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long)]
         index: Vec<String>,
 
         /// Columns whose values fill the cells.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long)]
         values: Vec<String>,
 
         /// Aggregation for cells with several values: first, last, sum, min, max, mean, median, count.
@@ -822,11 +823,11 @@ enum Commands {
     #[command(visible_alias = "melt")]
     Unpivot {
         /// Columns kept as identifiers.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long)]
         index: Vec<String>,
 
         /// Columns to unpivot. Defaults to every non-index column.
-        #[arg(long, value_delimiter = ',')]
+        #[arg(long)]
         on: Vec<String>,
 
         /// Name of the variable column.
@@ -1508,6 +1509,14 @@ struct RenderOptions {
 const RUN_STACK_SIZE: usize = 32 * 1024 * 1024;
 
 pub fn run() -> anyhow::Result<()> {
+    // Corrupt binary input can panic inside Polars' decoders; `read` turns those panics into
+    // errors, so their default panic message would only be noise.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        if !crate::read::is_decoding_binary() {
+            default_hook(info);
+        }
+    }));
     std::thread::Builder::new()
         .name("pl".to_owned())
         .stack_size(RUN_STACK_SIZE)
@@ -1606,7 +1615,7 @@ fn run_command(cli: &Cli, command: Commands) -> anyhow::Result<()> {
             last,
             maintain_order: _,
         } => {
-            columns.extend(subset);
+            columns.extend(selector::split_list_arguments(&subset));
             let keep = if last { KeepArg::Last } else { keep };
             emit(ops::unique(frame()?, &columns, keep.into())?)
         }
@@ -1769,9 +1778,9 @@ fn run_command(cli: &Cli, command: Commands) -> anyhow::Result<()> {
         } => emit(reshape::pivot(
             frame()?,
             &PivotOptions {
-                on,
-                index,
-                values,
+                on: selector::split_list_arguments(&on),
+                index: selector::split_list_arguments(&index),
+                values: selector::split_list_arguments(&values),
                 aggregate,
                 separator,
             },
@@ -1783,8 +1792,8 @@ fn run_command(cli: &Cli, command: Commands) -> anyhow::Result<()> {
             value_name,
         } => emit(reshape::unpivot(
             frame()?,
-            &index,
-            &on,
+            &selector::split_list_arguments(&index),
+            &selector::split_list_arguments(&on),
             variable_name.as_deref(),
             value_name.as_deref(),
         )?),

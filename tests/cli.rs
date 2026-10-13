@@ -2557,3 +2557,125 @@ fn cli_join_output_follows_left_rows_then_right_rows() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn cli_sort_by_treats_bare_integers_as_column_positions() -> Result<()> {
+    assert_eq!(
+        json_for(r#"[{"a":"x","b":2},{"a":"y","b":1}]"#, &["sort-by", "2"])?,
+        json!([{"a": "y", "b": 1}, {"a": "x", "b": 2}])
+    );
+    assert!(error_for(r#"[{"a":1}]"#, &["sort-by", "3"])?.contains("position 3 is out of range"));
+    Ok(())
+}
+
+#[test]
+fn cli_selectors_matching_nothing_do_not_fall_back_to_every_column() -> Result<()> {
+    let data = r#"[{"a":1,"b":null},{"a":1,"b":null}]"#;
+    assert_eq!(
+        json_for(data, &["drop-nulls", "^nothing$"])?
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert!(error_for(data, &["unique", "type:boolean"])?.contains("matched no columns"));
+    Ok(())
+}
+
+#[test]
+fn cli_selects_columns_whose_names_look_like_patterns() -> Result<()> {
+    let dir = TempDir::new()?;
+    let path = write_fixture(&dir, "weird.csv", "a,^a$,*\n1,2,3\n")?;
+    cmd()?
+        .arg(&path)
+        .args(["select", "^a$", "*", "a", "--to", "csv"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("^a$,*,a\n2,3,1\n"));
+    Ok(())
+}
+
+#[test]
+fn cli_list_options_keep_selector_tokens_whole() -> Result<()> {
+    let data = r#"[{"k":1,"v":"a","w":true},{"k":1,"v":"a","w":false}]"#;
+    assert_eq!(
+        json_for(data, &["unique", "--subset", "index:0,1"])?,
+        json!([{"k": 1, "v": "a", "w": true}])
+    );
+    assert_eq!(
+        json_for(
+            r#"[{"id":1,"a":2,"b":"x"}]"#,
+            &["unpivot", "--index", "id,b"]
+        )?,
+        json!([{"id": 1, "b": "x", "variable": "a", "value": 2}])
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_handles_extreme_numeric_arguments_without_panicking() -> Result<()> {
+    let data = r#"[{"s":"abc","n":1},{"s":"de","n":2}]"#;
+    assert_eq!(
+        json_for(data, &["shift", "-9223372036854775808", "n"])?,
+        json!([{"s": "abc", "n": null}, {"s": "de", "n": null}])
+    );
+    assert_eq!(
+        json_for(data, &["str-slice", "-9223372036854775808", "s"])?,
+        json!([{"s": "abc", "n": 1}, {"s": "de", "n": 2}])
+    );
+    assert_eq!(
+        json_for(data, &["arg-sort", "n", "--limit", "4294967296"])?,
+        json!([{"arg_sort": 0}, {"arg_sort": 1}])
+    );
+    assert!(error_for(data, &["sample", "--fraction", "NaN"])?.contains("between 0 and 1"));
+    assert!(error_for(data, &["qcut", "1000000000", "n"])?.contains("at most"));
+    Ok(())
+}
+
+#[test]
+fn cli_reads_text_that_starts_like_a_binary_format_as_text() -> Result<()> {
+    for input in ["PAR1\n", "ARROW1,x\n1,2\n", "Obj\u{1}abc\n"] {
+        cmd()?
+            .args(["count", "--to", "csv"])
+            .write_stdin(input)
+            .assert()
+            .success()
+            .stdout(predicate::eq("count\n1\n"));
+    }
+    Ok(())
+}
+
+#[test]
+fn cli_reports_corrupt_binary_input_as_an_error_not_a_panic() -> Result<()> {
+    let parquet = cmd()?
+        .args([
+            "--data",
+            r#"[{"a":1,"b":"x"},{"a":2,"b":"y"}]"#,
+            "--to",
+            "parquet",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dir = TempDir::new()?;
+    for (index, cut) in [8usize, parquet.len() / 2, parquet.len() - 6]
+        .into_iter()
+        .enumerate()
+    {
+        let mut corrupt = parquet.clone();
+        corrupt[cut] ^= 0xff;
+        corrupt.truncate(corrupt.len().max(cut + 1));
+        let path = dir.path().join(format!("corrupt{index}.parquet"));
+        std::fs::write(&path, &corrupt)?;
+        let output = cmd()?
+            .arg("open")
+            .arg(&path)
+            .env("RUST_BACKTRACE", "0")
+            .output()?;
+        assert!(matches!(output.status.code(), Some(0 | 1)), "{output:?}");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("panicked"));
+    }
+    Ok(())
+}

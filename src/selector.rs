@@ -53,6 +53,26 @@ pub fn is_selector_syntax(token: &str) -> bool {
         || token.starts_with(INDEX_PREFIX)
 }
 
+/// Split comma-delimited column options (`--index a,b`) while keeping selector tokens whole,
+/// so `index:0,2`, `type:i64,str`, and `^\w{1,3}$` stay single selectors.
+pub fn split_list_arguments(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .flat_map(|value| {
+            if is_selector_syntax(value) {
+                vec![value.clone()]
+            } else {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|part| !part.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            }
+        })
+        .collect()
+}
+
 /// Resolve selector tokens to column names, preserving token order and removing duplicates.
 pub fn resolve(schema: &Schema, specs: &[String]) -> anyhow::Result<Vec<String>> {
     let mut selected = Vec::new();
@@ -243,6 +263,14 @@ mod tests {
         assert!(resolve(&schema, &specs(&["index:9"])).is_err());
         assert!(resolve(&schema, &specs(&["type:nonsense"])).is_err());
         assert!(resolve(&schema, &specs(&["^nothing$"])).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_arguments_split_on_commas_except_inside_selectors() {
+        assert_eq!(
+            super::split_list_arguments(&specs(&["a,b", "index:0,2", "type:i64,str", "c"])),
+            ["a", "b", "index:0,2", "type:i64,str", "c"]
+        );
     }
 
     #[test]
