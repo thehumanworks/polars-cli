@@ -2,11 +2,11 @@
 
 ## Project Structure & Module Organization
 
-`src/cli.rs` contains the CLI entrypoint logic and argument routing. `src/read.rs` owns input parsing and format inference. `src/transformer.rs` owns output rendering and document conversion helpers. `src/ops.rs` holds the SQL-backed frame operations; `src/ops/` holds column transforms (`column.rs`, `strings.rs`, `temporal.rs`), aggregations (`aggregate.rs`), and reshaping (`reshape.rs`). `src/selector.rs` resolves column selectors and `src/value.rs` parses dtypes and literal values. `src/bin/pl.rs` and `src/bin/polars.rs` are thin wrappers around the shared CLI runner in `src/lib.rs`.
+`src/cli.rs` contains the CLI entrypoint logic and argument routing. `src/read.rs` owns input parsing and format inference. `src/transformer.rs` owns output rendering and document conversion helpers. `src/ops.rs` holds the SQL-backed frame operations; `src/ops/` holds column transforms (`column.rs`, `strings.rs`, `temporal.rs`), aggregations (`aggregate.rs`), and reshaping (`reshape.rs`). `src/selector.rs` resolves column selectors and `src/value.rs` parses dtypes and literal values. `src/db.rs` and `src/db/` implement `pl db` (read-only PostgreSQL, MySQL/MariaDB, and SQLite queries) behind the default `database` feature; they are the only code that opens network connections or reads credentials (ADR 0003). `src/bin/pl.rs` and `src/bin/polars.rs` are thin wrappers around the shared CLI runner in `src/lib.rs`.
 
 `docs/nushell-parity.md` maps every Nushell `polars` command to `pl`; keep it current when commands change. `docs/adr/` records interface decisions.
 
-Integration tests live in `tests/cli.rs` and cover the installed binary behavior. Library-level behavior and format conversions are covered in `tests/library.rs`. Sample inputs such as `test.csv` and `index.html` are useful local fixtures when checking manual conversions.
+Integration tests live in `tests/cli.rs` and cover the installed binary behavior. Library-level behavior and format conversions are covered in `tests/library.rs`. `tests/db.rs` covers `pl db`: its SQLite tests always run, and its PostgreSQL and MySQL tests run when `PL_TEST_POSTGRES_URL` and `PL_TEST_MYSQL_URL` name servers to use. Sample inputs such as `test.csv` and `index.html` are useful local fixtures when checking manual conversions.
 
 ## Build, Test, and Development Commands
 
@@ -15,7 +15,7 @@ Integration tests live in `tests/cli.rs` and cover the installed binary behavior
 - `cargo run --bin polars -- --version` verifies the alias binary.
 - `cargo build` compiles all targets.
 - `cargo test` runs unit, integration, and doc tests.
-- `cargo clippy --all-targets --all-features -- -D warnings` enforces lint cleanliness.
+- `cargo clippy --all-targets --all-features -- -D warnings` enforces lint cleanliness; repeat it with `--no-default-features` for the build without `pl db`.
 - `cargo fmt --check` verifies formatting.
 - `cargo install --path . --force --bin pl --bin polars` installs the two binaries into `~/.cargo/bin`.
 

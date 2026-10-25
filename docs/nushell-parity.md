@@ -15,13 +15,17 @@ instead of copying Nushell's value types:
   `COLUMN...` selectors (default: every column), replace those columns in place, and
   accept `--as NAME` to add a new column instead. On a one-column input this is
   exactly the Nushell behavior.
+- **Databases are read with `pl db`.** The plugin has no database reader (Nushell
+  reads SQLite with `query db`). `pl db QUERY` runs a read-only query on
+  PostgreSQL, MySQL/MariaDB, or SQLite and emits the result as a frame; see
+  [ADR 0003](adr/0003-database-sources.md).
 - **Selectors are column arguments.** `polars selector …` values become selector
   tokens: `*`, `^regex$`, `type:GROUP`, and `index:N`. See
   [Column selectors](../README.md#column-selectors).
 
 | Nushell | `pl` | Notes |
 | --- | --- | --- |
-| `polars open` | `pl open` | `-t/--type`, `-d/--delimiter`, `--infer-schema`, `--skip-rows`, `--columns`, `-s/--schema`, `--truncate-ragged-lines`. Nushell's `--no-header` is `--no-input-header`, because `--no-header` already controls CSV output. Reads CSV, TSV, JSON, JSONL/NDJSON, Parquet, Arrow IPC, and Avro, plus YAML, TOML, Markdown, HTML tables, XML, and text. Cloud URLs, hive partitioning, and `--eager` (every stage is eager) are not provided. |
+| `polars open` | `pl open` | `-t/--type`, `-d/--delimiter`, `--infer-schema`, `--skip-rows`, `--columns`, `-s/--schema`, `--truncate-ragged-lines`. Nushell's `--no-header` is `--no-input-header`, because `--no-header` already controls CSV output. Reads CSV, TSV, JSON, JSONL/NDJSON, Parquet, Arrow IPC, and Avro, plus YAML, TOML, Markdown, HTML tables, XML, and text. Cloud URLs, hive partitioning, and `--eager` (every stage is eager) are not provided; databases are read with `pl db`. |
 | `polars save` | `pl save PATH` | `-t/--type`, `--csv-delimiter`, `--csv-no-header`, `--avro-compression deflate\|snappy`. Prints nothing. `--output PATH` and `pl to FORMAT` remain available. |
 | `polars into-df` | `pl into-df` | Alias of `open`. `--as-columns` reads `{"a":[…],"b":[…]}` as columns; `--schema` is `open -s`. |
 | `polars into-nu` | `pl to FORMAT` | `--rows N` → `pl first N`; `--tail` → `pl last N`; `--index` → `pl with-row-index`. |

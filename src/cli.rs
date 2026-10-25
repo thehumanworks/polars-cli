@@ -319,6 +319,23 @@ struct OpenArgs {
     as_columns: bool,
 }
 
+#[cfg(feature = "database")]
+#[derive(Debug, Clone, Args)]
+struct DbArgs {
+    /// One SQL statement in the database's own dialect that returns rows. - reads it from stdin, @PATH from a file.
+    #[arg(allow_hyphen_values = true, value_name = "QUERY")]
+    query: String,
+
+    /// Connection URL: postgres://, mysql://, mariadb://, or sqlite://PATH. Keep passwords in the environment variable.
+    #[arg(
+        long,
+        env = "PL_DATABASE_URL",
+        hide_env_values = true,
+        value_name = "URL"
+    )]
+    url: String,
+}
+
 #[derive(Debug, Clone, Args)]
 struct SaveArgs {
     /// Destination file. Its extension selects the format unless --type is given.
@@ -445,6 +462,10 @@ enum Commands {
 
     /// Write the input to a file; prints nothing.
     Save(SaveArgs),
+
+    /// Read the result of a read-only SQL query on PostgreSQL, MySQL/MariaDB, or SQLite.
+    #[cfg(feature = "database")]
+    Db(DbArgs),
 
     /// Keep rows matching a Polars SQL predicate.
     #[command(visible_aliases = ["where", "filter-with"])]
@@ -1567,6 +1588,8 @@ fn run_command(cli: &Cli, command: Commands) -> anyhow::Result<()> {
     match command {
         Commands::Open(args) => run_open(cli, &args),
         Commands::Save(args) => run_save(cli, &args),
+        #[cfg(feature = "database")]
+        Commands::Db(args) => run_db(cli, &args),
         Commands::Filter { predicate } => emit(ops::filter(frame()?, &predicate)?),
         Commands::Select { expressions } => emit(ops::select(frame()?, &expressions)?),
         Commands::WithColumn { assignments } => emit(ops::with_columns(frame()?, &assignments)?),
@@ -2450,6 +2473,31 @@ fn run_save(cli: &Cli, args: &SaveArgs) -> anyhow::Result<()> {
         }
     };
     write_rendered(Some(&args.path), rendered, format)
+}
+
+#[cfg(feature = "database")]
+fn run_db(cli: &Cli, args: &DbArgs) -> anyhow::Result<()> {
+    if cli.input.is_some() || cli.data.is_some() || !cli.inputs.is_empty() {
+        bail!("db reads from the database and does not take an input");
+    }
+    let statement = match args.query.as_str() {
+        "-" => {
+            if std::io::stdin().is_terminal() {
+                bail!("no query provided; pipe SQL on stdin or pass it as an argument");
+            }
+            let mut statement = String::new();
+            std::io::stdin()
+                .read_to_string(&mut statement)
+                .context("failed to read the query from stdin")?;
+            statement
+        }
+        query => match query.strip_prefix('@') {
+            Some(path) => std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read query file {path}"))?,
+            None => query.to_owned(),
+        },
+    };
+    emit_frame(cli, crate::db::query(&args.url, &statement)?, None, None)
 }
 
 fn reject_input(cli: &Cli, command: &str) -> anyhow::Result<()> {

@@ -17,6 +17,59 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: pl
+          POSTGRES_PASSWORD: pl
+          POSTGRES_DB: pl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U pl -d pl_test"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: pl_test
+          MYSQL_USER: pl
+          MYSQL_PASSWORD: pl
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -u pl -ppl"
+          --health-interval 5s --health-timeout 5s --health-retries 30
+    env:
+      # Polars debug info would fill the runner's disk.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      PL_TEST_POSTGRES_URL: postgres://pl:pl@127.0.0.1:5432/pl_test
+      PL_TEST_MYSQL_URL: mysql://pl:pl@127.0.0.1:3306/pl_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Test without the database feature
+        run: cargo test --locked --no-default-features
+
   compile:
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}

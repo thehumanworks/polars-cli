@@ -152,6 +152,61 @@ unknown extensions are content-sniffed; Parquet, Arrow, and Avro are recognized
 by their magic bytes. Use `--from` whenever the content is ambiguous, such as a
 one-column CSV.
 
+## Query databases
+
+`pl db` runs one read-only SQL statement on PostgreSQL, MySQL/MariaDB, or SQLite
+and emits the result like any other command, so the database does the filtering
+it is good at and Polars does the rest:
+
+```bash
+export PL_DATABASE_URL='postgres://analyst@db.example.com/shop?sslmode=verify-full'
+
+pl db "SELECT customer, total FROM orders WHERE created_at >= now() - interval '30 days'" --to arrow \
+  | pl group-by customer --agg 'SUM(total) AS revenue' \
+  | pl sort-by revenue:desc \
+  | pl first 10
+```
+
+QUERY uses the database's own SQL dialect. `-` reads it from stdin and `@PATH`
+from a file:
+
+```bash
+pl db @reports/monthly.sql --output monthly.parquet
+pl db 'SELECT kind FROM events' --url sqlite://app.db | pl value-counts kind
+```
+
+| URL | Database |
+| --- | --- |
+| `postgres://USER@HOST:PORT/DATABASE` or `postgresql://…` | PostgreSQL |
+| `mysql://USER@HOST:PORT/DATABASE` or `mariadb://…` | MySQL, MariaDB |
+| `sqlite://PATH`, or `sqlite:///ABSOLUTE/PATH` | SQLite |
+
+- **Read-only.** PostgreSQL and MySQL run the statement in a read-only
+  transaction. SQLite files are opened read-only and never created. `pl db` runs
+  exactly one statement, and only one that returns columns.
+- **Credentials.** `--url` falls back to `PL_DATABASE_URL`. Keep URLs that contain
+  passwords in the variable: other users can see arguments in `ps`, and the shell
+  saves them in its history. PostgreSQL also reads `PGPASSWORD`, the other `PG*`
+  variables, and `~/.pgpass`. Error messages name the server but never the
+  password.
+- **TLS.** The URL's `sslmode` (PostgreSQL; default `prefer`) or `ssl-mode` (MySQL;
+  default `PREFERRED`) chooses it, as in `psql` and `mysql`. Use `verify-full` or
+  `VERIFY_IDENTITY` across a network; `sslrootcert` / `ssl-ca` name a CA file,
+  and otherwise the system trust store is used. Unknown URL parameters are
+  errors, so a misspelt `sslmode` cannot silently weaken the connection.
+- **Types.** Columns are typed from the statement, so empty results keep their
+  schema: `numeric`/`DECIMAL` become decimals, `timestamptz`/`TIMESTAMP` UTC
+  datetimes, `interval`/`TIME` durations, arrays lists, and `bytea`/`BLOB` binary.
+  A value Polars cannot hold exactly, such as a NaN numeric or an infinite
+  timestamp, is an error that suggests a cast in the query. Sessions use UTC.
+  [ADR 0003](docs/adr/0003-database-sources.md) has the full mapping.
+- **Typed pipelines.** On the JSONL wire, decimals and timestamps travel as
+  text. Add `--to arrow` when later stages compute with them, as in the first
+  example.
+
+`pl db` is part of the default build. `cargo install --path . --no-default-features`
+builds `pl` without it, and without any network or credential code.
+
 ## Output and stream contract
 
 ```bash
@@ -174,7 +229,8 @@ Supported outputs are `csv`, `tsv`, `json`, `jsonl`/`ndjson`, `yaml`/`yml`,
 (`ipc`, `feather`), `avro`, and `repr` (Polars' own display format).
 
 Binary formats are written verbatim to files and pipes, but `pl` refuses to
-write them to a terminal. `save` writes a file and prints nothing:
+write them to a terminal. JSON, JSONL, CSV, TSV, YAML, and TOML write binary
+columns as lowercase hex. `save` writes a file and prints nothing:
 
 ```bash
 pl open people.csv | pl save people.parquet
@@ -219,7 +275,7 @@ pl open events.csv \
 
 | Area | Commands |
 | --- | --- |
-| Read/write | `open`/`into-df`, `save`, `to` |
+| Read/write | `open`/`into-df`, `save`, `to`, `db` |
 | Rows | `filter`/`where`/`filter-with`, `first`/`head`, `last`/`tail`, `slice`, `take`, `sample`, `sort-by`/`sort`, `unique`/`distinct`/`drop-duplicates`, `drop-nulls`, `reverse`, `shift`, `with-row-index` |
 | Columns | `select`/`get`, `with-column`/`mutate`, `drop`, `rename`, `cast`, `fill-null`, `fill-nan`, `set`, `set-with-idx`, `replace`, `cut`, `qcut`, `integer`, `decimal` |
 | Aggregate | `group-by`, `sum`, `min`, `max`, `mean`, `median`, `std`, `var`, `quantile`, `entropy`, `count`, `len`, `count-null`, `n-unique`, `implode`, `all-true`, `all-false`, `value-counts`, `summary` |
@@ -456,4 +512,14 @@ Legacy `--sql` defaults to Markdown output. New pipelines should normally use
 cargo fmt --check
 cargo test
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy --all-targets --no-default-features -- -D warnings
+```
+
+`cargo test` runs the SQLite tests of `pl db`. Point these variables at scratch
+databases to run its PostgreSQL and MySQL tests too:
+
+```bash
+PL_TEST_POSTGRES_URL=postgres://pl:pl@localhost/pl_test \
+PL_TEST_MYSQL_URL=mysql://pl:pl@localhost/pl_test \
+cargo test --test db
 ```
