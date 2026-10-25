@@ -167,6 +167,21 @@ pl db "SELECT customer, total FROM orders WHERE created_at >= now() - interval '
   | pl first 10
 ```
 
+To use Polars as the query engine across sources, pipe the result to `pl query`,
+where it is `df`. Polars SQL's `read_csv`, `read_parquet`, `read_ipc`, and
+`read_json` bring in files, including another database's result saved as Arrow:
+
+```bash
+pl db 'SELECT customer_id, total FROM orders' --to arrow \
+  | pl query "SELECT c.region, SUM(o.total) AS revenue
+              FROM df AS o JOIN read_parquet('customers.parquet') AS c USING (customer_id)
+              GROUP BY c.region"
+
+pl db 'SELECT id, tier FROM accounts' --url "$CRM_URL" --to arrow > tiers.arrow
+pl db 'SELECT id, total FROM invoices' --to arrow \
+  | pl query "SELECT i.id, i.total, t.tier FROM df AS i JOIN read_ipc('tiers.arrow') AS t USING (id)"
+```
+
 QUERY uses the database's own SQL dialect. `-` reads it from stdin and `@PATH`
 from a file:
 

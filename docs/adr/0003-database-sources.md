@@ -20,7 +20,14 @@ That works, but it loses types (CSV has no decimals, timestamps with zones,
 binary, or lists, and an empty result has no schema). It also needs `psql` or
 `mysql` installed, and it splits one task between tools with different quoting,
 TLS, and credential conventions. Python Polars solves this with
-`read_database_uri`; the Rust crate has no database reader.
+`read_database_uri`; the Rust crate has no database reader, and Polars SQL's table
+functions read only files (`read_csv`, `read_parquet`, `read_ipc`, `read_json`).
+
+The Polars authors' own CLI, `pola-rs/polars-cli` (archived in 2025 for lack of
+maintainers), took the SQL-first route: one `SQLContext`, sources pulled in by
+those table functions, and a `.save`/`.open` session file. It never read
+databases; its request for SQLite queries (issue #64) was still open when it was
+archived.
 
 ## Decisions
 
@@ -46,6 +53,13 @@ The result becomes a Polars frame, and later stages (pivots, rolling windows,
 joins with local files, conversion to Parquet) run in Polars. `pl` does not
 translate Polars SQL into a server dialect, and it never reads whole tables
 implicitly.
+
+Polars SQL stays the engine across sources, as in the archived CLI, without a new
+mechanism. Piped into `pl query`, a `pl db` result is `df`, and the table
+functions join it with files in one Polars plan. A second database's result joins
+the same way after `pl db … --to arrow > file.arrow`. Database tables are not
+registered in Polars SQL directly: that would put credentials into another
+command, and it would hide which part of the plan runs on the server.
 
 ### Read-only, one statement
 

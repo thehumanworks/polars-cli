@@ -181,6 +181,40 @@ fn db_results_feed_pl_pipelines() -> Result<()> {
 }
 
 #[test]
+fn db_results_join_local_files_in_one_polars_sql_query() -> Result<()> {
+    let dir = TempDir::new()?;
+    let url = sqlite_fixture(
+        &dir,
+        "CREATE TABLE orders (customer TEXT, total REAL);
+         INSERT INTO orders VALUES ('ada', 10), ('bob', 5), ('ada', 2.5);",
+    )?;
+    let customers = dir.path().join("customers.csv");
+    std::fs::write(&customers, "customer,region\nada,north\nbob,south\n")?;
+    let orders = pl()?
+        .args(["db", "SELECT * FROM orders", "--url", &url, "--to", "arrow"])
+        .output()?;
+    assert!(orders.status.success());
+
+    pl()?
+        .args([
+            "query",
+            &format!(
+                "SELECT c.region, SUM(o.total) AS revenue FROM df AS o \
+                 JOIN read_csv('{}') AS c ON o.customer = c.customer \
+                 GROUP BY c.region ORDER BY c.region",
+                customers.display()
+            ),
+            "--to",
+            "csv",
+        ])
+        .write_stdin(orders.stdout)
+        .assert()
+        .success()
+        .stdout("region,revenue\nnorth,12.5\nsouth,5.0\n");
+    Ok(())
+}
+
+#[test]
 fn db_reads_the_url_from_pl_database_url() -> Result<()> {
     let dir = TempDir::new()?;
     let url = sqlite_fixture(
