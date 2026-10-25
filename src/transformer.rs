@@ -1,9 +1,14 @@
-use std::{borrow::Cow, fmt::Display};
+use std::{
+    borrow::Cow,
+    fmt::{Display, Write as _},
+};
 
 use anyhow::{Context, bail};
 use htmd::HtmlToMarkdown;
 use polars::io::avro::{AvroCompression, AvroWriter};
-use polars::prelude::{AnyValue, SerWriter};
+use polars::prelude::{
+    AnyValue, Column, DataType, IntoSeries, PolarsResult, SerWriter, Series, StringChunked,
+};
 use polars::{
     frame::DataFrame,
     prelude::{
@@ -57,6 +62,8 @@ pub fn to_delimited(
     if df.width() == 0 {
         return Ok(String::new());
     }
+    let mut hex = binary_as_hex(df)?;
+    let df = hex.as_mut().unwrap_or(df);
     let mut writer = Vec::new();
     CsvWriter::new(&mut writer)
         .include_header(include_header)
@@ -105,6 +112,8 @@ pub fn to_repr(df: &DataFrame) -> String {
 }
 
 pub fn to_json(df: &mut DataFrame, format: Option<JsonFormat>) -> anyhow::Result<String> {
+    let mut hex = binary_as_hex(df)?;
+    let df = hex.as_mut().unwrap_or(df);
     let mut writer = Vec::new();
     JsonWriter::new(&mut writer)
         .with_json_format(format.unwrap_or_default().into())
@@ -317,6 +326,57 @@ fn dataframe_to_string_rows(df: &DataFrame) -> anyhow::Result<(Vec<String>, Vec<
     }
 
     Ok((headers, rows))
+}
+
+/// Polars cannot write binary values to JSON or CSV, so text formats carry them as lowercase
+/// hex. Returns `None` when the frame has no binary values.
+fn binary_as_hex(df: &DataFrame) -> anyhow::Result<Option<DataFrame>> {
+    if !df
+        .columns()
+        .iter()
+        .any(|column| contains_binary(column.dtype()))
+    {
+        return Ok(None);
+    }
+    let columns = df
+        .columns()
+        .iter()
+        .map(|column| Ok(Column::from(hex_series(column.as_materialized_series())?)))
+        .collect::<PolarsResult<Vec<_>>>()?;
+    Ok(Some(DataFrame::new(df.height(), columns)?))
+}
+
+fn contains_binary(dtype: &DataType) -> bool {
+    match dtype {
+        DataType::Binary => true,
+        DataType::List(inner) => contains_binary(inner),
+        _ => false,
+    }
+}
+
+fn hex_series(series: &Series) -> PolarsResult<Series> {
+    match series.dtype() {
+        DataType::Binary => Ok(series
+            .binary()?
+            .into_iter()
+            .map(|value| {
+                value.map(|bytes| {
+                    let mut hex = String::with_capacity(bytes.len() * 2);
+                    for byte in bytes {
+                        let _ = write!(hex, "{byte:02x}");
+                    }
+                    hex
+                })
+            })
+            .collect::<StringChunked>()
+            .with_name(series.name().clone())
+            .into_series()),
+        DataType::List(inner) if contains_binary(inner) => Ok(series
+            .list()?
+            .apply_to_inner(&|inner| hex_series(&inner))?
+            .into_series()),
+        _ => Ok(series.clone()),
+    }
 }
 
 fn render_any_value(value: AnyValue<'_>) -> String {

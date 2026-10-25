@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Accepted. ADR 0003 reverses the network and credential exclusion under *Not
+ported* for one command, `pl db`.
 
 ## Context
 

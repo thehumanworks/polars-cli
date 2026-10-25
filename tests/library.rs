@@ -161,6 +161,29 @@ fn read_xml_file_parses_named_fields_rows() -> Result<()> {
 }
 
 #[test]
+fn json_and_csv_output_write_binary_values_as_hex() -> Result<()> {
+    use polars::prelude::{NamedFrom, Series};
+
+    let element = Series::new("".into(), [vec![0x0a_u8]]);
+    let mut df = df!(
+        "raw" => [Some(vec![0x01_u8, 0xab]), None],
+        "raws" => [element.clone(), element],
+    )?;
+
+    assert_eq!(
+        as_json(&mut df)?,
+        json!([{"raw": "01ab", "raws": ["0a"]}, {"raw": null, "raws": ["0a"]}])
+    );
+    assert_eq!(
+        to_json(&mut df.select(["raw"])?, Some(JsonFormat::JsonLines))?,
+        "{\"raw\":\"01ab\"}\n{\"raw\":null}\n"
+    );
+    assert_eq!(to_csv(&mut df.select(["raw"])?, None)?, "raw\n01ab\n\n");
+
+    Ok(())
+}
+
+#[test]
 fn csv_output_can_omit_the_header_row() -> Result<()> {
     let mut df = df!(
         "id" => &[1, 2],
